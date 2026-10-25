@@ -23,6 +23,7 @@ ResponseKind = Literal["test_proposal", "review"]
 ProviderErrorCode = Literal[
     "failed", "timeout", "cancelled", "input_limit", "output_limit",
     "invalid_response", "unknown_usage", "budget_exhausted", "budget_unknown",
+    "refusal", "incomplete", "authentication", "rate_limit", "network_error", "service_error", "unsupported_schema",
 ]
 
 
@@ -31,7 +32,8 @@ class ProviderError(RuntimeError):
 
     def __init__(self, code: ProviderErrorCode, *, usage: ModelUsage | None = None):
         allowed = {"failed", "timeout", "cancelled", "input_limit", "output_limit",
-                   "invalid_response", "unknown_usage", "budget_exhausted", "budget_unknown"}
+                   "invalid_response", "unknown_usage", "budget_exhausted", "budget_unknown",
+                   "refusal", "incomplete", "authentication", "rate_limit", "network_error", "service_error", "unsupported_schema"}
         self.code = code if code in allowed else "failed"
         # Validated usage may accompany an unusable output. It is data for the
         # controller's separate per-run ledger, never part of the error message.
@@ -51,6 +53,7 @@ class ProviderResponse(Contract):
     output_json: str
     usage: ModelUsage | None
     request_id: Annotated[str, Field(min_length=1, max_length=128, pattern=r"^[A-Za-z0-9_-]+$")] | None = None
+    error_code: ProviderErrorCode | None = None
 
 
 class StructuredResponse(Contract):
@@ -70,6 +73,10 @@ class ProviderBoundary:
             raise ConfigurationError("Cumulative store limit must match trusted configuration")
         self._transport, self._store, self._count_tokens = transport, store, count_input_tokens
 
+    def count_input_tokens(self, request: ProviderRequest) -> int:
+        """Reuse this session's counter for ContextCollector and final requests."""
+        return self._count_tokens(request)
+
     async def complete(self, response_kind: ResponseKind, input_json: str) -> StructuredResponse:
         """Model/settings/schema are selected by trusted code, never PR fields."""
         request = None
@@ -82,7 +89,7 @@ class ProviderBoundary:
             request = ProviderRequest(model=self.config.model, response_kind=response_kind,
                                       input_json=input_json, max_input_tokens=limits.max_input_tokens,
                                       max_output_tokens=limits.max_output_tokens)
-            count = self._count_tokens(request)
+            count = self.count_input_tokens(request)
             if type(count) is not int or count < 0 or count > limits.max_input_tokens:
                 request = None
         except Exception:
@@ -116,6 +123,7 @@ class ProviderBoundary:
             response = ProviderResponse.model_validate({
                 "output_json": "", "usage": metadata.get("usage"),
                 "request_id": metadata.get("request_id"),
+                "error_code": metadata.get("error_code"),
             })
         except asyncio.CancelledError:
             cancelled = True
@@ -128,7 +136,7 @@ class ProviderBoundary:
         if response is not None:
             usage = response.usage
             if usage is None or usage.input_tokens is None or usage.output_tokens is None or usage.estimated_cost_usd is None:
-                failure = "unknown_usage"
+                failure = response.error_code or "unknown_usage"
             elif usage.model != self.config.model or (
                 usage.request_id is not None and response.request_id is not None
                 and usage.request_id != response.request_id
@@ -161,7 +169,9 @@ class ProviderBoundary:
         result = None
         try:
             response = ProviderResponse.model_validate(raw)
-            if (
+            if response.error_code is not None:
+                failure = response.error_code
+            elif (
                 len(response.output_json.encode("utf-8")) > self.config.max_response_bytes
                 or response.usage.output_tokens > limits.max_output_tokens
                 or response.usage.input_tokens > limits.max_input_tokens

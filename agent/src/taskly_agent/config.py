@@ -37,10 +37,10 @@ class AgentConfig(Contract):
         return self
 
     def require_live_budget(self) -> None:
-        """A future live transport must call this before initializing its client.
+        """Live transports must call this before initializing their client.
 
         Fake mode is convenient configuration, not a network sandbox. No live
-        transport exists here; its future opt-in must not rely on the default.
+        transport is selected here; explicit opt-in must not rely on the default.
         """
         config = AgentConfig.model_validate(self)
         if config.mode != "live":

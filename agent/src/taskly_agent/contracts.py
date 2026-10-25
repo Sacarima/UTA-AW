@@ -301,7 +301,16 @@ class ModelUsage(Contract):
     request_id: NonEmptyText | None = None
     input_tokens: Count | None = None
     output_tokens: Count | None = None
+    reasoning_tokens: Count | None = None
     estimated_cost_usd: EstimatedUSD | None = None
+
+    @model_validator(mode="after")
+    def reasoning_is_output_subset(self):
+        if self.reasoning_tokens is not None and (
+            self.output_tokens is None or self.reasoning_tokens > self.output_tokens
+        ):
+            raise ValueError("reasoning tokens must be a subset of output tokens")
+        return self
 
 
 class RunLimits(Contract):

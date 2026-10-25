@@ -198,6 +198,13 @@ class ExecutionController:
                 "unknown_usage": ("incomplete", "unknown_cost"),
                 "budget_unknown": ("blocked", "unknown_cost"),
                 "budget_exhausted": ("blocked", "budget_exhausted"),
+                "authentication": ("blocked", "component_failure"),
+                "rate_limit": ("incomplete", "component_failure"),
+                "network_error": ("incomplete", "component_failure"),
+                "service_error": ("incomplete", "component_failure"),
+                "refusal": ("blocked", "component_failure"),
+                "incomplete": ("incomplete", "invalid_component_output"),
+                "unsupported_schema": ("blocked", "invalid_input"),
             }.get(exc.code, ("failed", "invalid_component_output"))
             return finish(outcome, reason, "Provider boundary stopped execution")
         except asyncio.CancelledError:
