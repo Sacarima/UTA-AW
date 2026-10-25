@@ -16,8 +16,13 @@ No function here writes files or authorizes execution of their contents.
 """
 
 from pathlib import Path
+from collections.abc import Mapping
 import re
 import stat
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from .contracts import TestProposal
 
 
 class PathPolicyError(ValueError):
@@ -86,6 +91,19 @@ def validate_test_path(path: str) -> str:
     if not (backend or frontend):
         raise PathPolicyError("only backend and frontend test-file paths are allowed")
     return path
+
+
+def validate_proposal_targets(proposal: "TestProposal", eligible: Mapping[str, str]) -> None:
+    """Authorize exact analysis-selected paths/operations, never broad roots alone."""
+    paths = []
+    for change in proposal.changes:
+        validate_test_path(change.path)
+        path = change.path.casefold()
+        if any(path == other or path.startswith(other + "/") or other.startswith(path + "/") for other in paths):
+            raise PathPolicyError("duplicate or overlapping proposal paths")
+        paths.append(path)
+    if any(eligible.get(change.path) != change.operation for change in proposal.changes):
+        raise PathPolicyError("proposal is outside deterministic test scope")
 
 
 def resolve_test_path(repository_root: Path, path: str) -> Path:

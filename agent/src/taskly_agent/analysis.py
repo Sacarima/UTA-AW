@@ -6,6 +6,7 @@ removed sources get cleanup notes, never new-source generation targets.
 """
 
 import asyncio
+from collections.abc import Collection
 from pathlib import PurePosixPath
 from typing import Literal
 
@@ -27,6 +28,27 @@ class ChangeAnalysis(Contract):
     changes: tuple[ChangedFile, ...]
     impacts: tuple[TestImpact, ...]
     decision: AgentDecision
+
+
+def eligible_test_paths(impacts: tuple[TestImpact, ...], available_tests: Collection[str]) -> dict[str, str]:
+    """Deterministic proposal scope, shared by adapters and isolated application.
+
+    Adapters supply only tests whose contents are in context; the writer supplies
+    the pinned regular-file inventory. Missing original tests never become create
+    permissions. These candidates still require strict path and filesystem checks.
+    """
+    paths = {}
+    for impact in impacts:
+        if impact.recommendation == "skip_removed":
+            continue
+        paths.update((path, "modify") for path in impact.existing_tests if path in available_tests)
+        suggested = impact.suggested_test
+        if suggested is not None:
+            if suggested in available_tests:
+                paths[suggested] = "modify"
+            elif suggested not in impact.existing_tests:
+                paths[suggested] = "create"
+    return paths
 
 
 def _component(path: str) -> str | None:

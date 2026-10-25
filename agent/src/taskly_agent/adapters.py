@@ -16,10 +16,12 @@ before any future live transport is enabled.
 import asyncio
 import json
 import re
+from .analysis import eligible_test_paths
 from .context import ContextCollector, ContextLimits, SourceContext
 from .contracts import AgentDecision, ReviewResult, TestProposal, VerificationEvidence
 from .lifecycle import AdapterError, ExecutionPolicy, GenerationResponse, ReviewResponse, RunInput, proposal_digest
 from .provider import ProviderBoundary, ProviderError
+from .policy import PathPolicyError, validate_proposal_targets
 
 
 _COMMON = (
@@ -82,20 +84,14 @@ def _eligible(context: SourceContext) -> dict[str, str]:
     This is proposal validation only, never filesystem write authorization.
     """
     existing = {file.path for file in context.repository_data.files if file.role == "test"}
-    paths = {}
-    for impact in context.repository_data.impacts:
-        if impact.recommendation == "skip_removed":
-            continue
-        paths.update((path, "modify") for path in impact.existing_tests if path in existing)
-        if impact.suggested_test is not None:
-            paths[impact.suggested_test] = "modify" if impact.suggested_test in existing else "create"
-    return paths
+    return eligible_test_paths(context.repository_data.impacts, existing)
 
 
 def _check_proposal(proposal: TestProposal, context: SourceContext) -> None:
-    paths = _eligible(context)
-    if any(paths.get(change.path) != change.operation for change in proposal.changes):
-        raise AdapterError("invalid_input")
+    try:
+        validate_proposal_targets(proposal, _eligible(context))
+    except PathPolicyError:
+        raise AdapterError("invalid_input") from None
 
 
 class _Adapter:
