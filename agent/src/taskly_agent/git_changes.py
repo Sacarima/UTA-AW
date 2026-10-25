@@ -7,6 +7,8 @@ external diff helpers, textconv, pagers, hooks, replacement objects or protocols
 """
 
 import contextlib
+from dataclasses import dataclass
+import hashlib
 import os
 from pathlib import Path
 import re
@@ -75,8 +77,14 @@ def parse_name_status(output: bytes) -> tuple[ChangedFile, ...]:
     return tuple(changes)
 
 
-def parse_tree(output: bytes) -> dict[str, str]:
-    """Parse ls-tree -r -z into path -> mode, without reading file contents."""
+@dataclass(frozen=True)
+class GitObject:
+    mode: str
+    object_id: str
+
+
+def parse_tree_objects(output: bytes) -> dict[str, GitObject]:
+    """Parse ls-tree -r -z without reading or following filesystem paths."""
     files = {}
     for record in _records(output):
         try:
@@ -88,10 +96,14 @@ def parse_tree(output: bytes) -> dict[str, str]:
             path = _path(raw_path)
             if path in files:
                 raise ValueError
-            files[path] = mode.decode("ascii")
+            files[path] = GitObject(mode.decode("ascii"), oid.decode("ascii"))
         except ValueError:
             raise GitAnalysisError("invalid_output") from None
     return files
+
+
+def parse_tree(output: bytes) -> dict[str, str]:
+    return {path: entry.mode for path, entry in parse_tree_objects(output).items()}
 
 
 class GitReader:
@@ -106,7 +118,10 @@ class GitReader:
             raise ValueError("repository must be a directory")
         self.timeout_seconds, self.max_output_bytes = timeout_seconds, max_output_bytes
 
-    def _run(self, *arguments: str) -> bytes:
+    def _run(self, *arguments: str, max_output_bytes: int | None = None) -> bytes:
+        limit = self.max_output_bytes if max_output_bytes is None else min(self.max_output_bytes, max_output_bytes)
+        if type(limit) is not int or limit <= 0:
+            raise GitAnalysisError("invalid_output_limit")
         command = [GIT_EXECUTABLE, "--no-pager", "-c", "core.hooksPath=/dev/null",
                    "-c", "core.fsmonitor=false", "-c", "protocol.allow=never", *arguments]
         environment = {
@@ -138,11 +153,20 @@ class GitReader:
                                 if size > self.max_output_bytes:
                                     raise GitAnalysisError("output_limit")
                                 if key.fileobj is process.stdout:
+                                    if len(output) + len(chunk) > limit:
+                                        raise GitAnalysisError("output_limit")
                                     output.extend(chunk)
                     process.wait(timeout=max(0.001, deadline - time.monotonic()))
                 except BaseException:
                     with contextlib.suppress(ProcessLookupError):
-                        os.killpg(process.pid, signal.SIGKILL)
+                        if process.poll() is None:
+                            try:
+                                os.killpg(process.pid, signal.SIGKILL)
+                            except PermissionError:
+                                # Some sandboxes deny group signals, including
+                                # after Git has exited. Popen.kill rechecks the
+                                # owned child; preserve the original limit error.
+                                process.kill()
                     process.wait()
                     raise
                 if process.returncode != 0:
@@ -165,3 +189,36 @@ class GitReader:
 
     def files(self, head: str) -> dict[str, str]:
         return parse_tree(self._run("ls-tree", "-r", "-z", "--full-tree", validate_commit(head)))
+
+    def objects(self, head: str) -> dict[str, GitObject]:
+        return parse_tree_objects(self._run("ls-tree", "-r", "-z", "--full-tree", validate_commit(head)))
+
+    def blob(self, object_id: str, *, max_bytes: int) -> bytes:
+        """Read an inventory-selected blob, with size and object-hash checks."""
+        object_id = validate_commit(object_id)
+        if type(max_bytes) is not int or max_bytes <= 0:
+            raise GitAnalysisError("invalid_output_limit")
+        size_text = self._run("cat-file", "-s", object_id)
+        if not re.fullmatch(rb"[0-9]{1,20}\n", size_text):
+            raise GitAnalysisError("invalid_output")
+        size = int(size_text)
+        if size > max_bytes:
+            raise GitAnalysisError("blob_limit")
+        data = self._run("cat-file", "blob", object_id, max_output_bytes=max_bytes)
+        digest = hashlib.sha1 if len(object_id) == 40 else hashlib.sha256
+        if len(data) != size or digest(f"blob {size}\0".encode() + data).hexdigest() != object_id:
+            raise GitAnalysisError("invalid_blob")
+        return data
+
+    def diff(self, base: str, head: str, paths: tuple[str, ...], *, max_bytes: int) -> bytes:
+        """No pathspec magic: paths are literal data, even when they contain '*'."""
+        base, head = validate_commit(base), validate_commit(head)
+        for path in paths:
+            validate_repository_path(path)
+        if not paths:
+            return b""
+        return self._run(
+            "--literal-pathspecs", "diff", "--no-ext-diff", "--no-textconv", "--no-color",
+            "--no-relative", "--unified=3", "--find-renames=50%", "-l1000", base, head,
+            "--", *paths, max_output_bytes=max_bytes,
+        )
