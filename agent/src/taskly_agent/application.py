@@ -23,6 +23,7 @@ from pathlib import Path
 import shutil
 import stat
 import tempfile
+from threading import Event
 from typing import Annotated, Literal
 import unicodedata
 
@@ -58,7 +59,7 @@ class AppliedPath(Contract):
 ApplicationReason = Literal[
     "applied", "invalid_input", "identity_mismatch", "analysis_blocked",
     "unauthorized_path", "target_mismatch", "unsafe_tree", "write_limit",
-    "workspace_limit", "git_error", "io_error", "application_error", "cleanup_failed",
+    "workspace_limit", "git_error", "io_error", "application_error", "cleanup_failed", "cancelled",
 ]
 
 
@@ -87,6 +88,11 @@ class WorkspaceCleanupError(RuntimeError):
 class _Rejected(Exception):
     def __init__(self, reason: ApplicationReason):
         self.reason = reason
+
+
+def _check_cancel(cancellation: Event | None) -> None:
+    if cancellation is not None and cancellation.is_set():
+        raise _Rejected("cancelled")
 
 
 def _hash(data: bytes) -> str:
@@ -215,6 +221,7 @@ class _Plan:
     inventory: dict[str, GitObject]
     originals: dict[str, bytes]
     changes: tuple[AppliedPath, ...]
+    cancellation: Event | None = None
 
 
 class ProposalApplier:
@@ -233,7 +240,8 @@ class ProposalApplier:
         if os.name != "posix" or not shutil.rmtree.avoids_symlink_attacks:
             raise ValueError("safe application requires POSIX directory handles and hardened cleanup")
 
-    def _validate(self, identity: PRIdentity, proposal: TestProposal) -> _Plan:
+    def _validate(self, identity: PRIdentity, proposal: TestProposal, cancellation: Event | None = None) -> _Plan:
+        _check_cancel(cancellation)
         identity = PRIdentity.model_validate(identity)
         if identity != self.identity or (self.analyzer.base_sha, self.analyzer.head_sha) != (
             self.identity.base_sha, self.identity.head_sha,
@@ -245,9 +253,11 @@ class ProposalApplier:
         if any(len(change.content.encode("utf-8")) > self.limits.max_workspace_file_bytes for change in proposal.changes):
             raise _Rejected("workspace_limit")
         analysis = self.analyzer.inspect()
+        _check_cancel(cancellation)
         if analysis.decision.action != "generate":
             raise _Rejected("analysis_blocked")
         inventory = self.analyzer.reader.objects(self.identity.head_sha)
+        _check_cancel(cancellation)
         if len(inventory) > self.limits.max_workspace_files:
             raise _Rejected("workspace_limit")
         if any(entry.mode not in {"100644", "100755"} for entry in inventory.values()):
@@ -267,6 +277,7 @@ class ProposalApplier:
             raise _Rejected("workspace_limit")
         originals, changes = {}, []
         for change in proposal.changes:
+            _check_cancel(cancellation)
             original = None
             if change.operation == "modify":
                 original = self.analyzer.reader.blob(inventory[change.path].object_id,
@@ -275,17 +286,20 @@ class ProposalApplier:
             changes.append(AppliedPath(path=change.path, operation=change.operation,
                 original_sha256=_hash(original) if original is not None else None,
                 resulting_sha256=_hash(change.content.encode("utf-8"))))
-        return _Plan(proposal, inventory, originals, tuple(changes))
+        return _Plan(proposal, inventory, originals, tuple(changes), cancellation)
 
     def _populate(self, root: int, plan: _Plan) -> None:
+        _check_cancel(plan.cancellation)
         os.mkdir("staging", 0o700, dir_fd=root)
         tree = os.open("staging", _DIRECTORY, dir_fd=root)
         try:
             expected, total = {}, 0
             for path, entry in plan.inventory.items():
+                _check_cancel(plan.cancellation)
                 data = plan.originals.get(path)
                 if data is None:
                     data = self.analyzer.reader.blob(entry.object_id, max_bytes=self.limits.max_workspace_file_bytes)
+                _check_cancel(plan.cancellation)
                 total += len(data)
                 if total > self.limits.max_workspace_bytes:
                     raise _Rejected("workspace_limit")
@@ -297,6 +311,7 @@ class ProposalApplier:
             if resulting_total > self.limits.max_workspace_bytes:
                 raise _Rejected("workspace_limit")
             for change in plan.proposal.changes:
+                _check_cancel(plan.cancellation)
                 data = change.content.encode("utf-8")
                 if change.operation == "modify":
                     original = plan.originals[change.path]
@@ -308,6 +323,7 @@ class ProposalApplier:
                 _write_file(tree, change.path, data, mode)
                 expected[change.path] = (_hash(data), len(data))
             _audit(tree, expected)
+            _check_cancel(plan.cancellation)
             if set(os.listdir(root)) != {"staging"}:
                 raise _Rejected("target_mismatch")
             os.rename("staging", "workspace", src_dir_fd=root, dst_dir_fd=root)
@@ -315,17 +331,19 @@ class ProposalApplier:
             os.close(tree)
 
     @contextmanager
-    def apply(self, identity: PRIdentity, proposal: TestProposal) -> Iterator[ApplicationResult]:
+    def apply(self, identity: PRIdentity, proposal: TestProposal, *, cancellation: Event | None = None) -> Iterator[ApplicationResult]:
         """Yield a receipt and temporary workspace; cleanup also follows caller errors.
 
         identity is checked against the constructor's trusted repository/PR/range,
         never against an untrusted origin URL. No existing workspace is accepted.
         Failure receipts have no paths/hashes for partially written proposals.
+        Cancellation is cooperative between bounded Git reads/file operations;
+        callers must still wait for cleanup before releasing the scope.
         """
         owner, digest = None, None
         reason = None
         try:
-            plan = self._validate(identity, proposal)
+            plan = self._validate(identity, proposal, cancellation)
             digest = proposal_digest(plan.proposal)
             owner = tempfile.TemporaryDirectory(prefix="taskly-application-", dir=self._parent)
             root = os.open(owner.name, _DIRECTORY)
