@@ -29,6 +29,7 @@ ReasonCode = Literal[
     "missing_evidence", "unavailable_evidence", "identity_mismatch", "cancelled",
     "timeout", "model_call_limit", "repair_limit", "budget_exhausted",
     "unknown_cost", "verification_blocked", "verification_skipped", "verification_incomplete",
+    "context_unavailable",
 ]
 
 
@@ -100,6 +101,14 @@ class Reviewer(Protocol):
     async def review(
         self, request: RunInput, proposal: TestProposal, policy: ExecutionPolicy,
     ) -> ReviewResponse: ...
+
+
+class AdapterError(ValueError):
+    """Fixed diagnostics for deterministic component pre-call rejection."""
+
+    def __init__(self, code: Literal["invalid_input", "identity_mismatch", "context_unavailable"]):
+        self.code = code if code in {"invalid_input", "identity_mismatch", "context_unavailable"} else "invalid_input"
+        super().__init__(f"Adapter {self.code}")
 
 
 class Verifier(Protocol):

@@ -17,7 +17,7 @@ from .contracts import (
     AgentDecision, ModelUsage, ReviewResult, RunOutcome, TestProposal, VerificationEvidence,
 )
 from .lifecycle import (
-    Analyzer, ExecutionPolicy, ExecutionReport, GenerationResponse, Generator,
+    AdapterError, Analyzer, ExecutionPolicy, ExecutionReport, GenerationResponse, Generator,
     Lifecycle, ModelCallAccounting, ReasonCode, Reviewer, ReviewResponse, RunInput,
     Verifier, accounted_cost, proposal_digest,
 )
@@ -178,6 +178,8 @@ class ExecutionController:
             return finish("passed", "completed", "Execution completed with passing independent verification")
         except _Stop as stop:
             return finish(stop.outcome, stop.code, stop.summary)
+        except AdapterError as exc:
+            return finish("blocked", exc.code, "Adapter rejected unavailable or inconsistent input")
         except ProviderError as exc:
             if accounting and accounting[-1].reported_cost_usd is None and exc.usage is not None:
                 try:

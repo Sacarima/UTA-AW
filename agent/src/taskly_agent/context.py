@@ -15,7 +15,7 @@ from pydantic import AfterValidator, Field, ValidationError, model_validator
 
 from .analysis import GitChangeAnalyzer, TestImpact
 from .config import AgentConfig
-from .contracts import ChangedFile, CommitSHA, Contract, Count, PRIdentity
+from .contracts import AgentDecision, ChangedFile, CommitSHA, Contract, Count, PRIdentity
 from .git_changes import GitAnalysisError
 from .lifecycle import RunInput
 from .provider import ProviderRequest
@@ -42,6 +42,7 @@ class ContextFile(Contract):
 class RepositoryContext(Contract):
     trust: Literal["untrusted"] = "untrusted"
     identity: PRIdentity
+    decision: AgentDecision
     changes: tuple[ChangedFile, ...]
     impacts: tuple[TestImpact, ...]
     files: tuple[ContextFile, ...]
@@ -216,7 +217,8 @@ class ContextCollector:
                 except ValueError:
                     raise _Unavailable("binary_file") from None
             context = SourceContext(repository_data=RepositoryContext(
-                identity=request.pr.identity, changes=analysis.changes, impacts=analysis.impacts,
+                identity=request.pr.identity, decision=analysis.decision,
+                changes=analysis.changes, impacts=analysis.impacts,
                 files=tuple(context_files),
                 unavailable_optional_paths=tuple(sorted(missing)),
                 diff_state="included" if limits.include_diff else "not_requested", diff=diff,
