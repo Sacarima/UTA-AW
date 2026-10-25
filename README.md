@@ -80,3 +80,5 @@ Coverage — `backend/coverage/html/index.html`:
 ```sh
 python -m pytest --cov=app --cov-report=term-missing --cov-report=html
 ```
+
+<!-- Taskly isolated CI smoke test -->
