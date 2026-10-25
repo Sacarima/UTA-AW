@@ -13,6 +13,7 @@ from .contracts import AgentDecision, ChangedFile, Contract
 from .git_changes import GitAnalysisError, GitReader, validate_commit
 from .lifecycle import ExecutionPolicy, RunInput
 from .policy import PathPolicyError, validate_test_path
+from .skills import SkillError, load_bundled_skills, select_skill_ids
 
 
 class TestImpact(Contract):
@@ -126,9 +127,15 @@ class GitChangeAnalyzer:
                              "No surviving source target for generation." if impacts else
                              "No supported production-code changes; tests, configuration, generated files and documentation do not require automatic test generation.")
                 action = "skip"
-            return ChangeAnalysis(changes=changes, impacts=tuple(impacts), decision=AgentDecision(
-                classification=classification, action=action, rationale=rationale,
-            ))
+            decision = AgentDecision(classification=classification, action=action, rationale=rationale)
+            if action == "generate":
+                try:
+                    selected = select_skill_ids(decision, tuple(impacts), load_bundled_skills())
+                    decision = AgentDecision(**{**decision.model_dump(), "selected_skills": selected})
+                except SkillError:
+                    decision = AgentDecision(classification=classification, action="block",
+                                             rationale="Bundled skills are missing, unsafe, or invalid")
+            return ChangeAnalysis(changes=changes, impacts=tuple(impacts), decision=decision)
         except GitAnalysisError as error:
             return ChangeAnalysis(changes=changes, impacts=(), decision=AgentDecision(
                 classification="irrelevant", action="block", rationale=f"Git analysis blocked: {error}",

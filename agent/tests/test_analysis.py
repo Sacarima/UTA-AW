@@ -62,7 +62,8 @@ def test_added_sources_become_convention_targets(repository, source, classificat
     report = analyzer(repository, base).inspect()
     assert report.decision.classification == classification
     assert report.decision.action == "generate"
-    assert report.decision.selected_skills == ()
+    language_skill = "python-unit-tests" if classification == "backend" else "react-unit-tests"
+    assert report.decision.selected_skills == (language_skill, "review-generated-tests")
     impact, = report.impacts
     assert impact.change.status == "added"
     assert impact.recommendation == "add_tests"
