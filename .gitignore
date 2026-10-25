@@ -12,3 +12,9 @@ htmlcov/
 *.db-wal
 .env
 .DS_Store
+*.egg-info/
+*.dist-info/
+*.egg
+.eggs/
+build/
+pip-wheel-metadata/
