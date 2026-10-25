@@ -7,6 +7,8 @@ uta/testgen/graph/generation-cycle.yaml. No graph engine or scheduler is used.
 
 import hashlib
 import json
+from collections.abc import Iterable
+from decimal import Decimal
 from typing import Literal, Protocol
 
 from pydantic import Field, model_validator
@@ -120,6 +122,12 @@ class ModelCallAccounting(Contract):
     component: Literal["generator", "reviewer"]
     reserved_cost_usd: EstimatedUSD
     reported_cost_usd: EstimatedUSD | None = None
+
+
+def accounted_cost(calls: Iterable[ModelCallAccounting]) -> Decimal:
+    """Known costs replace reservations; unknown calls retain their ceiling."""
+    return sum((Decimal(str(call.reported_cost_usd if call.reported_cost_usd is not None
+                            else call.reserved_cost_usd)) for call in calls), Decimal(0))
 
 
 class ExecutionReport(Contract):

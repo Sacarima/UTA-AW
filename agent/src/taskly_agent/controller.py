@@ -19,8 +19,10 @@ from .contracts import (
 from .lifecycle import (
     Analyzer, ExecutionPolicy, ExecutionReport, GenerationResponse, Generator,
     Lifecycle, ModelCallAccounting, ReasonCode, Reviewer, ReviewResponse, RunInput,
-    Verifier, proposal_digest,
+    Verifier, accounted_cost, proposal_digest,
 )
+from .config import AgentConfig
+from .provider import ProviderError
 
 
 class _Stop(Exception):
@@ -37,6 +39,11 @@ class ExecutionController:
         self.generator = generator
         self.verifier = verifier
         self.reviewer = reviewer
+
+    async def run_configured(self, request: RunInput, config: AgentConfig) -> ExecutionReport:
+        """Trusted configuration overrides PR review preferences and run limits."""
+        config = AgentConfig.model_validate(config)
+        return await self.run(config.run_input(request), config.execution_policy)
 
     async def run(self, request: RunInput, policy: ExecutionPolicy) -> ExecutionReport:
         """Revalidate inputs; each invocation has independent counters and state.
@@ -81,23 +88,18 @@ class ExecutionController:
             component = label
             return await asyncio.wait_for(operation, timeout=policy.limits.command_timeout_seconds)
 
-        def accounted_cost() -> Decimal:
-            # Decimal avoids false exhaustion at decimal currency boundaries.
-            return sum((Decimal(str(call.reported_cost_usd if call.reported_cost_usd is not None
-                                    else call.reserved_cost_usd)) for call in accounting), Decimal(0))
-
         def reserve_call(label: Literal["generator", "reviewer"]) -> None:
             nonlocal calls
             if calls >= policy.limits.max_model_calls:
                 raise _Stop("blocked", "model_call_limit", "Model-call limit exhausted")
-            if accounted_cost() + Decimal(str(policy.estimated_call_ceiling_usd)) > Decimal(str(policy.limits.estimated_budget_usd)):
+            if accounted_cost(accounting) + Decimal(str(policy.estimated_call_ceiling_usd)) > Decimal(str(policy.limits.estimated_budget_usd)):
                 raise _Stop("blocked", "budget_exhausted", "Estimated budget cannot cover another call")
             # Commit before invoking the component. Exceptions, cancellation,
             # timeout and invalid output leave this unknown-usage record intact.
             accounting.append(ModelCallAccounting(component=label, reserved_cost_usd=policy.estimated_call_ceiling_usd))
             calls += 1
 
-        def record_usage(usage: ModelUsage) -> None:
+        def record_usage(usage: ModelUsage, *, enforce_limits: bool = True) -> None:
             usages.append(usage)
             if usage.estimated_cost_usd is None:
                 raise _Stop("incomplete", "unknown_cost", "Component did not report estimated cost")
@@ -106,9 +108,9 @@ class ExecutionController:
                 component=reservation.component, reserved_cost_usd=reservation.reserved_cost_usd,
                 reported_cost_usd=usage.estimated_cost_usd,
             )
-            if (
+            if enforce_limits and (
                 usage.estimated_cost_usd > reservation.reserved_cost_usd
-                or accounted_cost() > Decimal(str(policy.limits.estimated_budget_usd))
+                or accounted_cost(accounting) > Decimal(str(policy.limits.estimated_budget_usd))
             ):
                 raise _Stop("blocked", "budget_exhausted", "Reported estimated cost exceeded its ceiling")
 
@@ -176,6 +178,26 @@ class ExecutionController:
             return finish("passed", "completed", "Execution completed with passing independent verification")
         except _Stop as stop:
             return finish(stop.outcome, stop.code, stop.summary)
+        except ProviderError as exc:
+            if accounting and accounting[-1].reported_cost_usd is None and exc.usage is not None:
+                try:
+                    known_usage = ModelUsage.model_validate(exc.usage)
+                except ValidationError:
+                    known_usage = None
+                if known_usage is not None and known_usage.estimated_cost_usd is not None:
+                    # Cumulative reconciliation already happened at the provider
+                    # boundary. Update only this run's receipt; do not spend again
+                    # or raise another stop while handling the original failure.
+                    record_usage(known_usage, enforce_limits=False)
+            outcome, reason = {
+                "failed": ("failed", "component_failure"),
+                "timeout": ("incomplete", "timeout"),
+                "cancelled": ("incomplete", "cancelled"),
+                "unknown_usage": ("incomplete", "unknown_cost"),
+                "budget_unknown": ("blocked", "unknown_cost"),
+                "budget_exhausted": ("blocked", "budget_exhausted"),
+            }.get(exc.code, ("failed", "invalid_component_output"))
+            return finish(outcome, reason, "Provider boundary stopped execution")
         except asyncio.CancelledError:
             return finish("incomplete", "cancelled", f"Execution cancelled during {component}")
         except TimeoutError:

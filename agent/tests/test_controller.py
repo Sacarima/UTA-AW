@@ -568,3 +568,151 @@ def test_clean_review_and_serious_findings_are_visible_without_overriding_verifi
         assert finding.severity == severity
         assert finding.message == "Additional assertion recommended"
         assert finding.path == "backend/tests/test_api.py" and finding.line == 1
+
+
+@pytest.mark.parametrize("enabled,untrusted_request", [(True, False), (False, True)])
+def test_configured_controller_uses_trusted_review_setting(enabled, untrusted_request):
+    from taskly_agent.config import AgentConfig
+
+    fake = Fakes()
+    controller = ExecutionController(analyzer=fake, generator=fake, verifier=fake, reviewer=fake)
+    report = asyncio.run(controller.run_configured(
+        run_input(untrusted_request), AgentConfig(model="fake-model", review_enabled=enabled),
+    ))
+    assert report.result.outcome == "passed"
+    assert ("review" in fake.order) is enabled
+
+
+def test_provider_cumulative_budget_and_controller_run_accounting_are_separate():
+    from taskly_agent.budget import InMemoryBudgetStore
+    from taskly_agent.config import AgentConfig
+    from taskly_agent.provider import ProviderBoundary, ProviderResponse
+    from taskly_agent.lifecycle import accounted_cost
+    from decimal import Decimal
+
+    config = AgentConfig(model="fake-model", cumulative_budget_usd=0.06)
+    store = InMemoryBudgetStore(config.cumulative_budget_usd)
+    fake = Fakes(("passed", "passed"))
+
+    class Transport:
+        calls = 0
+
+        async def complete(self, request):
+            self.calls += 1
+            return ProviderResponse(output_json='{"rationale":"Fixture","changes":[{'
+                '"path":"backend/tests/test_api.py","operation":"create","content":"assert True"}]}',
+                usage=ModelUsage(model="fake-model", input_tokens=10, output_tokens=10, estimated_cost_usd=0.01))
+
+    transport = Transport()
+    boundary = ProviderBoundary(config, transport, store, lambda request: 10)
+
+    async def generate(*args, **kwargs):
+        response = await boundary.complete("test_proposal", "{}")
+        return GenerationResponse(proposal=response.output, usage=response.usage)
+
+    fake.generate = generate
+    controller = ExecutionController(analyzer=fake, generator=fake, verifier=fake)
+    reports = [asyncio.run(controller.run_configured(run_input(True), config)) for _ in range(3)]
+    assert [report.result.outcome for report in reports] == ["passed", "passed", "blocked"]
+    assert reports[-1].reason_code == "budget_exhausted"
+    assert transport.calls == 2
+    assert accounted_cost(store.snapshot()) == Decimal("0.02")
+    assert [report.model_calls for report in reports] == [1, 1, 1]
+    assert reports[0].model_call_accounting[0].reported_cost_usd == 0.01
+
+
+def provider_execution(*, failure=None, output="valid", cost=0.01, cap=1.0, known=True):
+    """Exercise the actual provider boundary through a fake generator adapter."""
+    from taskly_agent.budget import InMemoryBudgetStore
+    from taskly_agent.config import AgentConfig
+    from taskly_agent.provider import ProviderBoundary, ProviderResponse
+
+    config = AgentConfig(model="fake-model", cumulative_budget_usd=cap)
+    store = InMemoryBudgetStore(cap, known=known)
+
+    class Transport:
+        calls = 0
+
+        async def complete(self, request):
+            self.calls += 1
+            if failure is not None:
+                raise failure
+            body = ('{"rationale":"Fixture","changes":[{"path":"backend/tests/test_api.py",'
+                    '"operation":"create","content":"assert True"}]}' if output == "valid" else output)
+            return ProviderResponse(output_json=body, usage=None if cost is None else ModelUsage(
+                model="fake-model", input_tokens=10, output_tokens=10, estimated_cost_usd=cost))
+
+    transport = Transport()
+    boundary = ProviderBoundary(config, transport, store, lambda request: 10)
+    fake = Fakes()
+
+    async def generate(*args, **kwargs):
+        response = await boundary.complete("test_proposal", "{}")
+        return GenerationResponse(proposal=response.output, usage=response.usage)
+
+    fake.generate = generate
+    controller = ExecutionController(analyzer=fake, generator=fake, verifier=fake)
+    return controller, boundary, transport, store, config
+
+
+@pytest.mark.parametrize("options,outcome,reason", [
+    ({"failure": RuntimeError("sk-test-secret")}, "failed", "component_failure"),
+    ({"failure": TimeoutError("sk-test-secret")}, "incomplete", "timeout"),
+    ({"cost": None}, "incomplete", "unknown_cost"),
+    ({"output": "not json"}, "failed", "invalid_component_output"),
+    ({"cap": 0.0}, "blocked", "budget_exhausted"),
+    ({"known": False}, "blocked", "unknown_cost"),
+    ({"cost": 0.06}, "blocked", "budget_exhausted"),
+])
+def test_provider_failures_map_to_controller_outcomes(options, outcome, reason):
+    controller, _, transport, store, config = provider_execution(**options)
+    report = asyncio.run(controller.run_configured(run_input(), config))
+    assert report.result.outcome == outcome and report.reason_code == reason
+    assert "sk-test" not in report.model_dump_json()
+    assert report.result.verification is None
+    assert transport.calls == (0 if options.get("cap") == 0.0 or options.get("known") is False else 1)
+    if "output" in options or options.get("cost") == 0.06:
+        from taskly_agent.lifecycle import accounted_cost
+        from decimal import Decimal
+
+        expected = options.get("cost", 0.01)
+        assert report.model_call_accounting[0].reported_cost_usd == expected
+        assert len(report.result.usage) == 1
+        assert accounted_cost(store.snapshot()) == Decimal(str(expected))
+    else:
+        assert report.model_call_accounting[0].reported_cost_usd is None
+
+
+def test_actual_cancellation_propagates_through_boundary_to_controller():
+    async def scenario():
+        controller, boundary, transport, store, config = provider_execution()
+        started, propagated = asyncio.Event(), asyncio.Event()
+
+        async def wait(request):
+            started.set()
+            await asyncio.Event().wait()
+
+        transport.complete = wait
+
+        async def generate(*args, **kwargs):
+            try:
+                await boundary.complete("test_proposal", "{}")
+            except asyncio.CancelledError:
+                propagated.set()
+                raise
+
+        controller.generator.generate = generate
+        task = asyncio.create_task(controller.run_configured(run_input(), config))
+        await started.wait()
+        task.cancel()
+        report = await task
+        assert propagated.is_set()
+        return report, store
+
+    report, store = asyncio.run(scenario())
+    from taskly_agent.lifecycle import accounted_cost
+    from decimal import Decimal
+
+    assert report.result.outcome == "incomplete" and report.reason_code == "cancelled"
+    assert report.model_call_accounting[0].reported_cost_usd is None
+    assert accounted_cost(store.snapshot()) == Decimal("0.05")
