@@ -1,12 +1,12 @@
-"""Sandbox execution seam. There is deliberately NO live/host implementation.
+"""Fixed sandbox execution plans. No host test execution is permitted.
 
 Local inspection: Docker CLI exists but its daemon is unavailable. macOS
 sandbox-exec can launch a harmless command outside the outer sandbox, but no
 profile with all required resource/isolation guarantees or pinned dependencies
-has been validated. Existing Dockerfiles/Compose are deployment infrastructure,
-not verification sandboxes; no CI sandbox configuration exists.
+has been validated locally. M3A adds a separately provisioned Linux Docker
+executor with a mandatory same-profile probe; deployment Compose is never used.
 
-A future live executor must copy the disposable workspace into a hardened
+The Docker executor copies the disposable workspace into a hardened
 sandbox, never mount host paths/sockets, supply only the environment below,
 use separately provisioned digest-pinned dependencies, disable networking and
 enforce filesystem, CPU, memory, process, time and streaming output limits.
@@ -21,7 +21,7 @@ from typing import Annotated, Literal, Protocol
 
 from pydantic import Field
 
-from .contracts import Contract, VerificationIdentity
+from .contracts import CommitSHA, Contract, RepositoryName, SHA256Digest, VerificationIdentity
 
 
 Suite = Literal["backend", "frontend"]
@@ -36,9 +36,17 @@ class ExecutionLimits(Contract):
     max_report_bytes: Annotated[int, Field(gt=0)] = 2_097_152
 
 
+class BaselineIdentity(Contract):
+    """Baseline execution has no generated proposal; do not invent one."""
+    repository: RepositoryName
+    head_sha: CommitSHA
+    policy_digest: SHA256Digest
+    baseline_digest: SHA256Digest
+
+
 class ExecutionJob(Contract):
     suite: Suite
-    identity: VerificationIdentity
+    identity: VerificationIdentity | BaselineIdentity
     argv: tuple[str, ...]
     cwd: Literal["backend", "frontend"]
     environment: tuple[tuple[str, str], ...]
@@ -46,19 +54,19 @@ class ExecutionJob(Contract):
     coverage_artifact: str
 
 
-def execution_job(suite: Suite, identity: VerificationIdentity) -> ExecutionJob:
-    """Fixed executable locations are INSIDE a future trusted image, never host PATH.
+def execution_job(suite: Suite, identity: VerificationIdentity | BaselineIdentity) -> ExecutionJob:
+    """Fixed executable locations are INSIDE the trusted image, never host PATH.
 
     Preserve project pytest/Vitest config; bypass package scripts. /reports must
     be empty and private per suite/run. Dependency resolution/provisioning is a
     future executor responsibility, not an install step in untrusted execution.
     """
     if suite == "backend":
-        argv = ("/opt/venv/bin/python", "-m", "pytest", "tests", "--junitxml=/reports/tests.xml",
+        argv = ("/opt/venv/bin/python", "-I", "-m", "pytest", "-p", "pytest_cov.plugin", "tests", "--junitxml=/reports/tests.xml",
                 "--cov=app", "--cov-report=json:/reports/coverage.json")
         tests, coverage = "/reports/tests.xml", "/reports/coverage.json"
     elif suite == "frontend":
-        argv = ("/usr/local/bin/node", "/opt/frontend/node_modules/vitest/vitest.mjs", "run", "--coverage",
+        argv = ("/usr/local/bin/node", "/opt/frontend/node_modules/vitest/vitest.mjs", "run", "--coverage", "--maxWorkers=1",
                 "--reporter=json", "--outputFile=/reports/tests.json",
                 "--coverage.reporter=json-summary", "--coverage.reportsDirectory=/reports/coverage")
         tests, coverage = "/reports/tests.json", "/reports/coverage/coverage-summary.json"
@@ -66,28 +74,30 @@ def execution_job(suite: Suite, identity: VerificationIdentity) -> ExecutionJob:
         raise ValueError("unsupported suite")
     return ExecutionJob(suite=suite, identity=identity, argv=argv, cwd=suite,
         environment=(("CI", "true"), ("HOME", "/tmp/empty-home"), ("PYTHONDONTWRITEBYTECODE", "1"),
-                     ("PYTHONHASHSEED", "0")), tests_artifact=tests, coverage_artifact=coverage)
+                     ("PYTHONHASHSEED", "0"), ("PYTEST_DISABLE_PLUGIN_AUTOLOAD", "1")), tests_artifact=tests, coverage_artifact=coverage)
 
 
 class ExecutionCapture(Contract):
     suite: Suite
-    identity: VerificationIdentity
+    identity: VerificationIdentity | BaselineIdentity
     state: Literal["completed", "timeout", "crashed", "unavailable"]
     exit_code: int | None = None
     tests_report: bytes | None = None
     coverage_report: bytes | None = None
     stdout: bytes = b""
     stderr: bytes = b""
+    execution_id: Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")] | None = None
 
 
 class SandboxRunner(Protocol):
     """Trusted code injection, never a PR/model-controlled capability declaration.
 
-    Only non-live modes exist. A simulator must not execute workspace code.
-    Tests inject canned captures; verifier evidence always remains unavailable.
+    Simulators must not execute workspace code or produce available evidence.
+    Only the reviewed DockerSandbox concrete type and its single-use receipts
+    can enable real verification; an arbitrary mode declaration is insufficient.
     """
 
-    mode: Literal["unavailable", "simulation"]
+    mode: Literal["unavailable", "simulation", "docker"]
 
     async def execute(self, workspace: Path, job: ExecutionJob, limits: ExecutionLimits) -> ExecutionCapture: ...
 

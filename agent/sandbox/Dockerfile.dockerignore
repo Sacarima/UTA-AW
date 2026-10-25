@@ -1,0 +1,15 @@
+**
+!agent/
+!agent/src/
+!agent/src/taskly_agent/
+!agent/src/taskly_agent/**
+!agent/sandbox/
+!agent/sandbox/Dockerfile
+!agent/sandbox/launch.py
+!backend/
+!backend/requirements.txt
+!frontend/
+!frontend/package.json
+!frontend/package-lock.json
+**/__pycache__
+**/*.pyc

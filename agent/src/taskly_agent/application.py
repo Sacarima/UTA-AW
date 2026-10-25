@@ -217,7 +217,7 @@ def _audit(root: int, expected: dict[str, tuple[str, int]]) -> None:
 
 @dataclass(frozen=True)
 class _Plan:
-    proposal: TestProposal
+    proposal: TestProposal | None
     inventory: dict[str, GitObject]
     originals: dict[str, bytes]
     changes: tuple[AppliedPath, ...]
@@ -306,11 +306,12 @@ class ProposalApplier:
                 _write_file(tree, path, data, 0o700 if entry.mode == "100755" else 0o600)
                 expected[path] = (_hash(data), len(data))
             _audit(tree, expected)
+            proposed = plan.proposal.changes if plan.proposal is not None else ()
             resulting_total = total + sum(len(change.content.encode("utf-8")) - len(plan.originals.get(change.path, b""))
-                                         for change in plan.proposal.changes)
+                                         for change in proposed)
             if resulting_total > self.limits.max_workspace_bytes:
                 raise _Rejected("workspace_limit")
-            for change in plan.proposal.changes:
+            for change in proposed:
                 _check_cancel(plan.cancellation)
                 data = change.content.encode("utf-8")
                 if change.operation == "modify":
@@ -329,6 +330,31 @@ class ProposalApplier:
             os.rename("staging", "workspace", src_dir_fd=root, dst_dir_fd=root)
         finally:
             os.close(tree)
+
+    @contextmanager
+    def baseline(self, identity: PRIdentity) -> Iterator[Path]:
+        """Exact unmodified head for CI baseline checks; never invent a proposal.
+
+        Uses the same materializer/audits as apply(), without test generation or
+        proposal authorization. This scope is not an application/verification receipt.
+        """
+        identity = PRIdentity.model_validate(identity)
+        if identity != self.identity or (self.analyzer.base_sha, self.analyzer.head_sha) != (identity.base_sha, identity.head_sha):
+            raise ValueError("baseline identity mismatch")
+        self.analyzer.reader.changes(identity.base_sha, identity.head_sha)
+        inventory = self.analyzer.reader.objects(identity.head_sha)
+        if len(inventory) > self.limits.max_workspace_files or any(
+            entry.mode not in {"100644", "100755"} for entry in inventory.values()
+        ):
+            raise ValueError("unsafe baseline inventory")
+        _layout(inventory)
+        with tempfile.TemporaryDirectory(prefix="taskly-baseline-", dir=self._parent) as directory:
+            root = os.open(directory, _DIRECTORY)
+            try:
+                self._populate(root, _Plan(None, inventory, {}, ()))
+            finally:
+                os.close(root)
+            yield Path(directory) / "workspace"
 
     @contextmanager
     def apply(self, identity: PRIdentity, proposal: TestProposal, *, cancellation: Event | None = None) -> Iterator[ApplicationResult]:

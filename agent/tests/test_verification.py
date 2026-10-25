@@ -69,10 +69,10 @@ def test_fixed_commands_preserve_project_configuration_and_no_host_environment(s
     assert job.cwd == suite and job.identity == IDENTITY
     assert "must-not-copy" not in job.model_dump_json()
     assert dict(job.environment) == {"CI": "true", "HOME": "/tmp/empty-home",
-        "PYTHONDONTWRITEBYTECODE": "1", "PYTHONHASHSEED": "0"}
+        "PYTHONDONTWRITEBYTECODE": "1", "PYTHONHASHSEED": "0", "PYTEST_DISABLE_PLUGIN_AUTOLOAD": "1"}
     assert job.tests_artifact.startswith("/reports/")
     if suite == "backend":
-        assert job.argv[:4] == ("/opt/venv/bin/python", "-m", "pytest", "tests")
+        assert job.argv[:7] == ("/opt/venv/bin/python", "-I", "-m", "pytest", "-p", "pytest_cov.plugin", "tests")
         assert "--cov=app" in job.argv and "--junitxml=/reports/tests.xml" in job.argv
     else:
         assert job.argv[:3] == ("/usr/local/bin/node", "/opt/frontend/node_modules/vitest/vitest.mjs", "run")

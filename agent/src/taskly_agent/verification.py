@@ -1,11 +1,10 @@
-"""Independent verifier adapter, fail closed until a real sandbox is validated.
+"""Independent verifier adapter; live execution requires validated Docker receipts.
 
 Simulation exercises application, capture validation and parsing, but NEVER
 returns available/passing VerificationEvidence. Counts in simulated reports
-are parser test data, not executed Taskly results. There is no live mode, host
-subprocess runner or structural 'secure=True' flag that enables real execution.
-Future live provenance and sandbox validation require a separately reviewed
-implementation; an enum/config change alone is insufficient.
+are parser test data, not executed Taskly results. Only the exact reviewed Linux
+DockerSandbox type, its runtime probe, and authenticated invocation receipts
+enable available evidence. No host subprocess fallback or capability bool exists.
 """
 
 import asyncio
@@ -80,10 +79,12 @@ class VerifierAdapter:
             return unavailable("identity_mismatch", "blocked")
         if policy.content_limits != self.applier.content_limits:
             raise AdapterError("invalid_input")
+        from .docker_runner import DockerSandbox
+        live = type(self.runner) is DockerSandbox
         mode = getattr(self.runner, "mode", "unavailable")
         if mode == "unavailable":
             return unavailable("sandbox_unavailable", "blocked")
-        if mode != "simulation":
+        if mode != "simulation" and not (live and mode == "docker"):
             return unavailable("unsafe_sandbox", "blocked")
         # Include every impacted stack, not just the language of model-selected
         # output files. Untrusted request.changed_files never selects commands.
@@ -95,6 +96,8 @@ class VerifierAdapter:
         limits = ExecutionLimits(**{**self.limits.model_dump(),
             "wall_seconds": min(self.limits.wall_seconds, policy.limits.command_timeout_seconds)})
         try:
+            if live:
+                await self.runner.validate(limits, identity)
             async with _workspace(self.applier, request.pr.identity, proposal) as applied:
                 if applied.state != "applied":
                     return unavailable("application_failed", "blocked")
@@ -107,10 +110,17 @@ class VerifierAdapter:
                         self.runner.execute(Path(applied.workspace), job, limits), limits.wall_seconds))
                     if capture.identity != identity or capture.suite != suite:
                         return unavailable("capture_identity_mismatch", "blocked")
+                    if live and not self.runner.consume_receipt(capture, job):
+                        return unavailable("execution_not_authenticated", "blocked")
                     reports.append(parse_capture(capture, limits))
                 summary = aggregate_reports(tuple(reports), required)
             # Exiting the scope (and successful cleanup) is part of completion.
-            return unavailable("simulation_only:" + summary.reason)
+            if not live:
+                return unavailable("simulation_only:" + summary.reason)
+            if summary.tests is None:
+                return unavailable("execution_incomplete")
+            return VerificationEvidence(state="available", outcome=summary.outcome, identity=identity,
+                tests=summary.tests, coverage=summary.coverage, reason=summary.reason)
         except asyncio.CancelledError:
             raise
         except TimeoutError:
