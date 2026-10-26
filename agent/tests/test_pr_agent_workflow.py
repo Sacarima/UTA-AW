@@ -49,6 +49,7 @@ def mapping(job, name):
         "${{ github.sha }}": BASE, "${{ github.run_id }}": "20", "${{ vars.TASKLY_PR_AI_ENABLED }}": "true",
         "${{ vars.TASKLY_PR_AGENT_BASE_SHA }}": BASE, "${{ secrets.OPENAI_API_KEY }}": "inert-model-key",
         "${{ steps.prepare.outputs.head }}": HEAD, "${{ needs.analyze.outputs.head }}": HEAD,
+        "${{ needs.analyze.outputs.classification }}": "frontend",
         "${{ needs.generate.result }}": "skipped", "${{ steps.admit.outputs.base }}": BASE,
         "${{ github.token }}": "inert-write-token" if job == "publish" else "inert-read-token"}
     lines = step_lines(job, name)
@@ -106,6 +107,7 @@ def test_actual_cli_arguments_environment_outputs_and_real_parser(runner, action
     if action == "publish": expected += ["--workflow-run", "20"]
     if action in {"analyze", "admit", "generate"}: expected += ["--expected-head", HEAD]
     if action in {"admit", "generate"}: expected += ["--workflow-sha", BASE]
+    if action == "admit": expected += ["--classification", "frontend"]
     if action == "generate": expected += ["--image-file", str(temporary / "pr-generation/image.id")]
     expected += ["--directory", str(directory)]
     if action == "publish":
@@ -133,6 +135,9 @@ def test_actual_cli_arguments_environment_outputs_and_real_parser(runner, action
     assert automation.main(call["argv"][3:]) == (1 if action == "generate" else 0)
     if action in {"prepare", "analyze", "admit", "generate"}:
         assert (temporary / "outputs").exists()
+    if action == "admit":
+        report = automation.PRReport.model_validate_json((directory / "report.json").read_text())
+        assert report.decision.classification == "frontend"
     if action == "publish": assert len(client.writes) == 1
     assert "inert-model-key" not in capsys.readouterr().out
 

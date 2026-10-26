@@ -28,10 +28,30 @@ pytestmark = pytest.mark.usefixtures("isolated_process")
 
 
 @pytest.fixture
-def pipeline(repository, monkeypatch):
+def pipeline(repository, monkeypatch, request):
+    stack = getattr(request, "param", "backend")
+    frontend = stack.startswith("frontend")
+    create = stack == "frontend-create"
+    source_path = "frontend/src/Widget.tsx" if frontend else "backend/app/service.py"
+    test_path = "frontend/src/Widget.test.tsx" if frontend else "backend/tests/test_service.py"
+    source = ('export function Widget() { return <button>Save</button> }\n' if frontend
+              else "def value():\n    return 2\n")
+    content = ("import { render, screen } from '@testing-library/react'\n"
+               "import { expect, it } from 'vitest'\n"
+               "import { Widget } from './Widget'\n"
+               "it('shows the save action', () => {\n"
+               "  render(<Widget />)\n"
+               "  expect(screen.getByRole('button', { name: 'Save' })).toBeEnabled()\n"
+               "})\n" if frontend else proposal().changes[0].content)
+    if stack == "frontend-ts":
+        source_path, test_path = "frontend/src/double.ts", "frontend/src/double.test.ts"
+        source = "export const double = (value: number) => value * 2\n"
+        content = ("import { expect, it } from 'vitest'\nimport { double } from './double'\n"
+                   "it('doubles its input', () => { expect(double(3)).toBe(6) })\n")
     base = git(repository, "rev-parse", "HEAD")
-    write(repository, "backend/app/service.py", "def value():\n    return 2\n")
-    write(repository, "backend/tests/test_service.py", "# pinned original\n")
+    write(repository, source_path, source)
+    if not create:
+        write(repository, test_path, "// pinned original\n" if frontend else "# pinned original\n")
     head = commit(repository)
     identity = PRIdentity(repository="Sacarima/UTA-AW", number=7, base_sha=base, head_sha=head)
     config = demo_config()
@@ -57,7 +77,7 @@ def pipeline(repository, monkeypatch):
             yield provider
 
     # Still use the complete existing SDK, provider, request validation and ledger.
-    http = HTTP(api_response(proposal().model_dump_json()))
+    http = HTTP(api_response(proposal(test_path, "create" if create else "modify", content).model_dump_json()))
     monkeypatch.setattr(end_to_end, "openai_provider", session)
     from contextlib import contextmanager
 
@@ -66,20 +86,22 @@ def pipeline(repository, monkeypatch):
         with original_apply(self, *args, **kwargs) as applied:
             if applied.workspace:
                 workspaces.append(Path(applied.workspace))
-                assert (Path(applied.workspace) / "backend/tests/test_service.py").read_text() != "# pinned original\n"
+                assert (Path(applied.workspace) / test_path).read_text() == content
             yield applied
 
     monkeypatch.setattr(end_to_end.ProposalApplier, "apply", apply)
 
     class Pipeline:
         def run(self, *, selected_config=config, selected_identity=identity, image=IMAGE,
-                trusted=base, allow_paid=True):
+                trusted=base, allow_paid=True, patch_directory=None):
             return asyncio.run(end_to_end.run(repository, selected_identity, image, trusted,
-                                             selected_config, allow_paid=allow_paid))
+                                             selected_config, allow_paid=allow_paid, patch_directory=patch_directory))
 
     value = Pipeline()
     value.repo, value.identity, value.config = repository, identity, config
     value.http, value.daemon, value.starts, value.workspaces = http, daemon, starts, workspaces
+    value.test_path, value.source_path, value.content = test_path, source_path, content
+    value.create = create
     return value
 
 
@@ -174,14 +196,13 @@ def test_missing_commit_objects_fail_closed(pipeline):
     assert not pipeline.http.requests
 
 
-@pytest.mark.parametrize("unsupported", ["frontend", "mixed"])
-def test_backend_only_guard_precedes_provider(pipeline, unsupported):
-    base = pipeline.identity.base_sha if unsupported == "mixed" else pipeline.identity.head_sha
+def test_mixed_guard_precedes_provider(pipeline):
+    base = pipeline.identity.base_sha
     write(pipeline.repo, "frontend/src/Widget.ts", "export const value = 1\n")
     head = commit(pipeline.repo)
     identity = PRIdentity(**{**pipeline.identity.model_dump(), "base_sha": base, "head_sha": head})
     report = pipeline.run(selected_identity=identity, trusted=base)
-    assert report.classification == unsupported and report.reason == "backend_only"
+    assert report.classification == "mixed" and report.reason == "unsupported_stack"
     assert not pipeline.http.requests and not pipeline.daemon.calls
 
 

@@ -1,10 +1,11 @@
-# Automatic backend PR agent (M5)
+# Automatic backend/frontend PR agent (M5)
 
 This implementation is prepared for review, not deployed. No workflow, secret,
 PR comment, paid request, commit or push was created during development.
 The existing secret-free `taskly-verification.yml` and successful M4C manual
-`taskly-live-demo.yml` are unchanged. No frontend generation, coverage backfill,
-queue, database, scheduler or publishing of commits is added.
+`taskly-live-demo.yml` are unchanged. Backend-only and frontend-only generation
+share the existing pipeline. Mixed generation, coverage backfill, queues,
+databases, schedulers and publishing of commits remain outside this milestone.
 
 ## Events and trust boundaries
 
@@ -71,9 +72,14 @@ A PR is eligible for the real API only when **all** these checks pass:
 - It is an open, non-draft, same-repository PR targeting `main`.
 - GitHub author association is OWNER, MEMBER or COLLABORATOR. A fork or other
   association is analysis-only even if a key happens to be configured.
-- Git metadata identifies a surviving backend production target and an add/update
-  decision. Frontend-only, mixed, tests-only and documentation-only changes do
-  not invoke the model in this milestone.
+- Git metadata identifies surviving backend-only or frontend-only production
+  targets and an add/update decision. Mixed, tests-only and documentation-only
+  changes do not invoke the model. Frontend generation selects the bundled
+  `react-unit-tests` guidance, plus `update-existing-tests` when appropriate.
+  Only analysis-authorized `.test.ts`/`.test.tsx` files under `frontend/src/`
+  can be created/modified; fixtures, setup, configuration and production files
+  remain protected. Independent frontend verification uses the existing fixed
+  Vitest command and JSON test/coverage reports inside Docker.
 - The matching baseline completed successfully on its first attempt; source
   base/head metadata is available and still matches the current PR.
 - Repository enablement, independent SHA approval and model credential pass.
@@ -143,7 +149,7 @@ Deterministic tests use real temporary Git histories plus fake GitHub, Responses
 HTTP and Docker. No automated test calls OpenAI. Before enabling the key, a human
 must land the implementation and validate on GitHub:
 
-1. With AI disabled, open/update a backend PR; verify automatic pinned analysis
+1. With AI disabled, open/update a frontend-only PR; verify automatic pinned analysis
    and its sanitized PR comment after the normal baseline finishes.
 2. Verify a fork/untrusted-author PR is analysis-only. GitHub sometimes omits
    source-run PR associations for forks: ambiguous/missing associations fail
@@ -152,12 +158,36 @@ must land the implementation and validate on GitHub:
    Reporting on forks with no authoritative association remains unsupported.
    Confirm actual GitHub metadata behavior on this repository.
 3. Configure/approve the new environment and enable generation for one trusted
-   backend PR. Confirm actual API usage, real Docker counts/coverage, correct
+   frontend PR. Confirm actual API usage, real Docker counts/coverage, correct
    patch digest/application scope, and a matching PR comment/artifact. No such
    paid test was run during implementation.
 4. Update the head while a run is in flight; confirm stale publication is
    suppressed. Check missing key, failed verification, artifact delivery and
    denied comment permissions produce explicit unavailable/failed results.
+
+For the M5B hosted check, after human review lands this version on protected
+`main`, independently set `TASKLY_PR_AGENT_BASE_SHA` to that exact reviewed SHA
+in `taskly-pr-agent`; keep its environment-only key and branch/approval rules.
+Start with `TASKLY_PR_AI_ENABLED` unset/false. Create a same-repository,
+non-draft PR by an authorized author containing one small observable change
+to `frontend/src/components/ApplicationHeader.tsx`, with unchanged dependency
+manifests and no backend changes. For example, add an optional subtitle prop
+whose default preserves the current `Task list` behavior, so the existing
+baseline tests still pass; the generated tests should cover the new custom
+subtitle behavior. A PR that already fails baseline tests remains ineligible
+under the unchanged authorization policy. Confirm frontend classification and the
+analysis-only comment. After explicit paid-run authorization, enable the flag
+and make a new reviewed PR head (an existing comment intentionally prevents
+spending again on its head). Wait for the successful first-attempt baseline
+and any environment approval. Check that the admitted classification is
+frontend, the real sandbox runs Vitest, evidence binds that head and policy,
+and the matching comment/artifact reports counts, coverage and bounded usage
+(two calls/one repair/$0.10 estimated maximum). Download the test-only patch,
+check its manifest/hash, and apply/check it only in a disposable checkout of
+the recorded head. Disable the flag after the authorized check. Repeat with a
+new small `.ts` utility PR only if separately authorized; the M4C manual backend
+workflow is unchanged. No real frontend model, Docker or GitHub execution was
+performed during deterministic implementation tests.
 
 Publication is one non-retried API write. One bot comment per head avoids spam;
 if a PR has 100 or more comments, this minimal implementation fails closed rather

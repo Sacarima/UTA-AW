@@ -1,4 +1,4 @@
-"""Trusted backend-only orchestration. Run the installed, reviewed package.
+"""Trusted single-stack orchestration. Run the installed, reviewed package.
 
 No injected commands, model-selected tools, publication, or simulation CLI exists.
 The controller owns per-run accounting; the provider owns cumulative accounting;
@@ -103,7 +103,7 @@ def validate_config(config: AgentConfig) -> AgentConfig:
     config = AgentConfig.model_validate(config)
     config.require_live_budget()
     if config.review_enabled or config.execution_policy.limits.max_model_calls > 2:
-        raise ConfigurationError("Backend demonstration requires review disabled and at most two calls")
+        raise ConfigurationError("Generation requires review disabled and at most two calls")
     return config  # Existing policy already caps repairs at one.
 
 
@@ -134,9 +134,9 @@ async def run(repository: Path, identity: PRIdentity, image: str, trusted_revisi
             return PublicReport(identity=identity, classification=classification,
                 outcome="skipped" if analysis.decision.action == "skip" else "blocked",
                 reason="analysis_skipped" if analysis.decision.action == "skip" else "analysis_blocked")
-        if classification != "backend":
+        if classification not in {"backend", "frontend"}:
             return PublicReport(identity=identity, classification=classification,
-                outcome="blocked", reason="backend_only")
+                outcome="blocked", reason="unsupported_stack")
         if not allow_paid:
             return PublicReport(identity=identity, classification=classification,
                 outcome="blocked", reason="paid_execution_not_authorized")
@@ -182,7 +182,7 @@ async def run(repository: Path, identity: PRIdentity, image: str, trusted_revisi
 
 
 def main(argv=None) -> int:
-    parser = argparse.ArgumentParser(description="Trusted backend AI generation with independent Docker verification")
+    parser = argparse.ArgumentParser(description="Trusted backend/frontend AI generation with independent Docker verification")
     parser.add_argument("--repository", type=Path, required=True)
     parser.add_argument("--name", required=True)
     parser.add_argument("--number", type=int, required=True)

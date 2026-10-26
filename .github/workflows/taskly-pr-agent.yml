@@ -20,6 +20,7 @@ jobs:
       ready: ${{ steps.prepare.outputs.ready }}
       eligible: ${{ steps.analysis.outputs.eligible }}
       head: ${{ steps.prepare.outputs.head }}
+      classification: ${{ steps.analysis.outputs.classification }}
     steps:
       - name: Checkout reviewed default-branch orchestration
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
@@ -129,6 +130,7 @@ jobs:
           REPOSITORY: ${{ github.repository }}
           SOURCE_RUN: ${{ github.event.workflow_run.id }}
           EXPECTED_HEAD: ${{ needs.analyze.outputs.head }}
+          CLASSIFICATION: ${{ needs.analyze.outputs.classification }}
           WORKFLOW_SHA: ${{ github.sha }}
           TASKLY_PR_AI_ENABLED: ${{ vars.TASKLY_PR_AI_ENABLED }}
           APPROVED_BASE: ${{ vars.TASKLY_PR_AGENT_BASE_SHA }}
@@ -138,7 +140,7 @@ jobs:
           set -euo pipefail
           "$RUNNER_TEMP/agent-venv/bin/python" -I -m taskly_agent.pr_automation admit \
             --name "$REPOSITORY" --source-run "$SOURCE_RUN" --expected-head "$EXPECTED_HEAD" \
-            --workflow-sha "$WORKFLOW_SHA" --directory "$RUNNER_TEMP/pr-generation"
+            --workflow-sha "$WORKFLOW_SHA" --classification "$CLASSIFICATION" --directory "$RUNNER_TEMP/pr-generation"
       - name: Checkout admitted candidate as Git data
         if: steps.admit.outputs.eligible == 'true'
         uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683

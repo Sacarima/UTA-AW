@@ -47,8 +47,9 @@ class PRReport(Contract):
         if self.decision is not None and result.classification != self.decision.classification:
             raise ValueError("analysis classification mismatch")
         for path in result.generated_paths:
-            if not validate_test_path(path).startswith("backend/tests/"):
-                raise ValueError("only backend generation supported")
+            root = {"backend": "backend/tests/", "frontend": "frontend/src/"}.get(result.classification)
+            if root is None or not validate_test_path(path).startswith(root):
+                raise ValueError("generated test path must match the supported stack")
         if result.usage and (result.usage.accounted_cost_usd > 0.10 or result.usage.estimated_reported_cost_usd > 0.10):
             raise ValueError("spending report exceeds policy")
         evidence_identity = result.verification_identity
@@ -66,7 +67,7 @@ class PRReport(Contract):
         if result.outcome == "passed" and (result.verification_state != "available" or result.verification_outcome != "passed"
             or not self.patch_available or not result.generated_paths or result.model_calls not in {1, 2}
             or result.usage is None or result.usage.unknown_cost_calls or not result.usage.input_tokens or not result.usage.output_tokens
-            or self.decision is None or self.decision.action != "generate" or self.decision.classification != "backend"):
+            or self.decision is None or self.decision.action != "generate" or self.decision.classification not in {"backend", "frontend"}):
             raise ValueError("success requires actual generation, verification and a reviewable patch")
         if self.patch_available and result.outcome != "passed":
             raise ValueError("failed/unavailable proposals cannot publish patches")
@@ -84,7 +85,7 @@ def generation_gate(context: PullRequestRun, decision: AgentDecision | None) -> 
         return "untrusted_author"
     if context.draft:
         return "draft"
-    if decision.classification != "backend":
+    if decision.classification not in {"backend", "frontend"}:
         return "unsupported_stack"
     if not context.baseline_passed:
         return "baseline_failed"
@@ -133,6 +134,10 @@ async def generate(repository, context, *, image, workflow_sha, approved_base, e
         return unavailable(context, reason, report.decision)
     result = await end_to_end.run(repository, context.identity, image, context.identity.base_sha,
         demo_config(budget_usd=0.10), allow_paid=True, patch_directory=patch_directory)
+    if result.classification is None:
+        # Runtime/input preflight can stop before the runner's own analysis.
+        # Retain this trusted Git analysis while keeping its failure/evidence.
+        result = PublicReport(**{**result.model_dump(), "classification": report.decision.classification})
     # The existing CLI owns the provider session/controller/verifier. A directory
     # is exported only after its authenticated verification and cleanup succeed.
     patch = result.outcome == "passed" and (patch_directory / "tests.patch").is_file() and (patch_directory / "manifest.json").is_file()
@@ -177,7 +182,7 @@ def render(report: PRReport, workflow_run_id: int) -> str:
     if report.patch_available:
         lines.append("Verified test-only patch available as a review artifact; it is untrusted code, never auto-applied.")
     lines.extend([f"[Workflow report/artifacts](https://github.com/{identity.repository}/actions/runs/{workflow_run_id})", "",
-        "Limits: backend generation only; no coverage improvement claim; passing counts do not prove assertion quality. "
+        "Limits: backend-only or frontend-only generation; mixed changes unsupported; no coverage improvement claim; passing counts do not prove assertion quality. "
         "Skipped/blocked generation is not AI success. Spending guards are process-local, not account billing caps."])
     return "\n".join(lines)
 
@@ -218,7 +223,7 @@ def _write(directory, report):
 
 
 def main(argv=None):
-    parser = argparse.ArgumentParser(description="Trusted PR analysis, bounded backend generation and safe reporting")
+    parser = argparse.ArgumentParser(description="Trusted PR analysis, bounded single-stack generation and safe reporting")
     parser.add_argument("action", choices=("prepare", "analyze", "admit", "generate", "publish"))
     parser.add_argument("--name", required=True)
     parser.add_argument("--source-run", type=int, required=True)
@@ -229,6 +234,8 @@ def main(argv=None):
     parser.add_argument("--workflow-run", type=int)
     parser.add_argument("--image-file", type=Path)
     parser.add_argument("--generated-report", type=Path)
+    parser.add_argument("--classification", choices=("backend", "frontend"), default="backend",
+        help="Trusted analysis classification for admission; generation independently reanalyzes Git")
     parser.add_argument("--generation-state", choices=("skipped", "success", "failure", "cancelled"), default="skipped")
     args = parser.parse_args(argv)
     try:
@@ -241,7 +248,7 @@ def main(argv=None):
             report = unavailable(context, "git_unavailable")
             eligible = False
             if args.action == "admit":
-                decision = AgentDecision(classification="backend", action="generate", rationale="Trusted analysis requested backend generation.")
+                decision = AgentDecision(classification=args.classification, action="generate", rationale="Trusted analysis requested single-stack generation.")
                 reason = authorize(context, decision, enabled=os.environ.get("TASKLY_PR_AI_ENABLED") == "true",
                     approved_base=os.environ.get("APPROVED_BASE", ""), workflow_sha=args.workflow_sha,
                     credential_present=bool(os.environ.get("OPENAI_API_KEY")))
@@ -256,7 +263,7 @@ def main(argv=None):
         elif args.action == "analyze":
             report = analyze(args.repository, context)
             _write(directory, report)
-            _outputs(context, report.reason == "ready")
+            _outputs(context, report.reason == "ready", classification=report.decision.classification)
         elif args.action == "generate":
             image = read_bounded(args.image_file, 128).decode().strip()
             if already_reported(client, context.identity):
@@ -297,12 +304,14 @@ def main(argv=None):
     return 1
 
 
-def _outputs(context, eligible):
+def _outputs(context, eligible, *, classification=None):
     path = os.environ.get("GITHUB_OUTPUT")
     if path:
         with open(path, "a") as stream:
             stream.write(f"base={context.identity.base_sha}\nhead={context.identity.head_sha}\nnumber={context.identity.number}\n"
                          f"eligible={'true' if eligible else 'false'}\nready=true\n")
+            if classification in {"backend", "frontend", "mixed", "irrelevant"}:
+                stream.write(f"classification={classification}\n")
 
 
 if __name__ == "__main__":

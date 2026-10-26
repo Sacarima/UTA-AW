@@ -1,4 +1,4 @@
-# Backend end-to-end execution (M4A)
+# Backend/frontend end-to-end execution
 
 The trusted entry point is `python -I -m taskly_agent.end_to_end`. Install it
 from reviewed orchestration code, independently of the candidate checkout.
@@ -9,8 +9,9 @@ arguments, tools, simulation mode, publisher, or workflow changes.
 Execution uses the existing analyzer, context collector and bundled skills,
 GeneratorAdapter, budgeted `openai_provider` session, ExecutionController,
 ProposalApplier, DockerSandbox and VerifierAdapter. Review is deliberately
-disabled for this first backend demonstration. Frontend/mixed generation is
-blocked; irrelevant changes skip without opening a provider session. Running
+disabled for bounded single-stack generation. Frontend-only and backend-only
+generation are supported; mixed generation is blocked. Irrelevant changes skip
+without opening a provider session. Running
 without `--allow-paid` performs identity/analysis checks only and cannot spend.
 The CLI rejects images whose trusted revision differs from the pinned base.
 
@@ -19,7 +20,7 @@ opens. This probe is not a test baseline or verification evidence. The controlle
 allows at most two generation calls, with the second only after available,
 independent failed verification. Missing evidence, unavailable execution, invalid
 proposals and provider errors do not trigger repair. The verifier applies each
-proposal to a fresh pinned snapshot, executes the fixed backend suite in Docker,
+proposal to a fresh pinned snapshot, executes the fixed pytest or Vitest suite in Docker,
 checks identities/one-use receipts, and disposes the workspace. No generated
 file is copied to the candidate or retained after verification.
 
