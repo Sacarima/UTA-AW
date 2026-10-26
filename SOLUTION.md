@@ -1,5 +1,70 @@
 # Taskly Unit Test Agent
 
+## Quick Start — How to Use the Agent
+
+1. **Clone and install.** Use Bash, Python 3.12, and `/usr/bin/git`.
+   Install only reviewed code; dependency installation needs package-index access.
+
+   ```bash
+   git clone https://github.com/Sacarima/UTA-AW.git
+   cd UTA-AW
+   python3.12 -m venv agent/.venv
+   agent/.venv/bin/python -m pip install -e './agent[test]'
+   ```
+
+2. **Verify locally without credentials.** No API key, Docker, Node, or database
+   is needed. Integration tests use fakes; the smoke command makes no API call.
+
+   ```bash
+   agent/.venv/bin/python -m pytest agent/tests -q
+   agent/.venv/bin/python -I -m taskly_agent.openai_smoke
+   ```
+
+3. **Receive automatic analysis.** In `Sacarima/UTA-AW`, open/update a PR targeting
+   `main` with `TASKLY_PR_AI_ENABLED` unset/false. With the workflows on the default
+   branch, Actions enabled, and PR-comment permission allowed, baseline completion
+   triggers analysis and a matched PR comment without an OpenAI key. Documentation
+   changes skip generation, as demonstrated on PR #3.
+
+4. **Enable paid generation only after approval.** An administrator creates
+   environment `taskly-pr-agent`, restricts it to protected `main`, sets its
+   environment-only `OPENAI_API_KEY` secret and independently approved
+   `TASKLY_PR_AGENT_BASE_SHA` variable, then sets repository variable
+   `TASKLY_PR_AI_ENABLED=true`. The approved SHA must equal PR base and workflow
+   commit. Retain required-reviewer protection as appropriate. Use a new reviewed
+   head after enablement; an existing bot report suppresses repeat spending.
+   Section 3 lists eligibility checks. **Automatic paid generation and hosted
+   frontend generation remain unverified.**
+
+5. **Retrieve and manually review generated tests.** Only after verified
+   generation succeeds, follow the PR comment's Actions link and download/extract
+   `taskly-verified-tests-<HEAD_SHA>` from **Artifacts** within its three-day
+   retention. It contains `tests.patch` and `manifest.json`; skipped/failed
+   generation has no verified patch. Review the patch as untrusted code and check
+   the manifest's repository, head, verification identity, and `patch_sha256`
+   against the successful run and the patch's SHA-256. Use a clean disposable
+   checkout at that exact head. After those checks, apply manually:
+
+   ```bash
+   read -r -p 'Absolute extracted artifact directory: ' ARTIFACT_DIR
+   read -r -p 'Absolute clean disposable checkout at verified head: ' REVIEW_CHECKOUT
+   git -C "$REVIEW_CHECKOUT" apply --check "$ARTIFACT_DIR/tests.patch"
+   git -C "$REVIEW_CHECKOUT" apply "$ARTIFACT_DIR/tests.patch"
+   git -C "$REVIEW_CHECKOUT" diff --check
+   git -C "$REVIEW_CHECKOUT" diff
+   ```
+
+   Generated tests are **never automatically committed, pushed, or merged**.
+   Test execution still belongs in the documented sandbox, without credentials.
+
+**Choose the right execution path:** the commands above test the agent locally.
+Local end-to-end generation requires trusted Linux/Docker, pinned Git identities,
+an immutable provisioned image, configuration, and explicit `--allow-paid`; follow
+[END_TO_END.md](agent/END_TO_END.md). GitHub PR automation provisions and invokes
+that same pipeline via workflows and protected environments; see
+[PR_AUTOMATION.md](agent/PR_AUTOMATION.md). The local CLI emits reports; PR
+integration enables patch export.
+
 ## 1. Overview and architecture
 
 Taskly uses React/TypeScript/Vitest and Python/FastAPI/pytest. The separate
@@ -46,18 +111,8 @@ size, directory contents, and identifiers are validated. PR files cannot supply 
 
 ### Reproduce local verification
 
-Use Bash, Git at `/usr/bin/git`, and Python 3.12 (CI uses 3.12.10).
-Run from a reviewed repository root. Installing dependencies needs package-index
-access; the tests and default transport smoke check need no API key, Docker,
-Node, PostgreSQL, or external service.
-
-```bash
-python3.12 -m venv agent/.venv
-agent/.venv/bin/python -m pip install -e './agent[test]'
-agent/.venv/bin/python -m pytest agent/tests -q
-agent/.venv/bin/python -I -m taskly_agent.openai_smoke
-git diff --check
-```
+The Quick Start above provides the exact agent installation, test-suite, and
+credential-free smoke commands. Run them from the reviewed repository root.
 
 Agent dependencies stay separate from `backend/requirements.txt`. For Taskly's
 own local test/coverage commands, see [README.md](README.md): frontend uses

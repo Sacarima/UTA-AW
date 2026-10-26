@@ -1,7 +1,14 @@
 # Automatic backend/frontend PR agent (M5)
 
-This implementation is prepared for review, not deployed. No workflow, secret,
-PR comment, paid request, commit or push was created during development.
+Hosted automatic analysis/reporting was demonstrated on
+[PR #3](https://github.com/Sacarima/UTA-AW/pull/3): the baseline and PR-agent
+workflow passed, documentation changes were classified `irrelevant`, generation
+was `analysis_skipped`, and GitHub Actions bot posted the PR comment. No model
+call was needed. **Automatic paid generation and hosted frontend AI generation
+remain unverified.** The separate manual backend live demonstration is recorded
+in [run 40297677678](https://github.com/Sacarima/UTA-AW/actions/runs/40297677678);
+it does not establish automatic paid execution.
+
 The existing secret-free `taskly-verification.yml` and successful M4C manual
 `taskly-live-demo.yml` are unchanged. Backend-only and frontend-only generation
 share the existing pipeline. Mixed generation, coverage backfill, queues,
@@ -9,14 +16,14 @@ databases, schedulers and publishing of commits remain outside this milestone.
 
 ## Events and trust boundaries
 
-The new `taskly-pr-agent.yml` follows **Taskly isolated verification** using
+The `taskly-pr-agent.yml` follows **Taskly isolated verification** using
 `workflow_run: completed`. The existing baseline starts for PR `opened`,
 `synchronize`, `reopened`, and `ready_for_review` events. After each baseline
 completion, the follower resolves the current PR through authenticated GitHub
 metadata, checks the source workflow name/path/event/repository, and analyzes
 the real pinned base/head Git objects. A failed baseline still permits analysis
-and reporting, but prevents paid generation. This follower must first be landed
-on the default branch; candidate workflow/agent changes never supply its code.
+and reporting, but prevents paid generation. The follower must be present on
+the default branch; candidate workflow/agent changes never supply its code.
 
 GitHub explicitly warns that `workflow_run` can access secrets/write tokens.
 We therefore never consume source-workflow artifacts, caches, scripts or test
@@ -50,8 +57,8 @@ validated one-use invocation receipts. There is no host-test fallback.
 
 ## Exactly when real AI generation occurs
 
-By default **all PRs are analysis-only**. A repository administrator must first
-review/land this code and explicitly enable the following configuration:
+Without explicit enablement, **all PRs are analysis-only**. A repository
+administrator must review the trusted default-branch code and enable:
 
 - Repository Actions variable `TASKLY_PR_AI_ENABLED=true`.
 - A separate environment **taskly-pr-agent**, restricted to protected `main`.
@@ -146,8 +153,9 @@ Do not execute an artifact merely because its manifest is structurally valid.
 ## Validation and remaining deployment checks
 
 Deterministic tests use real temporary Git histories plus fake GitHub, Responses
-HTTP and Docker. No automated test calls OpenAI. Before enabling the key, a human
-must land the implementation and validate on GitHub:
+HTTP and Docker. No automated test calls OpenAI. PR #3 verifies hosted
+analysis/reporting only. Before enabling paid execution, a human must approve
+the trusted default-branch revision and complete the remaining hosted checks:
 
 1. With AI disabled, open/update a frontend-only PR; verify automatic pinned analysis
    and its sanitized PR comment after the normal baseline finishes.
@@ -165,7 +173,7 @@ must land the implementation and validate on GitHub:
    suppressed. Check missing key, failed verification, artifact delivery and
    denied comment permissions produce explicit unavailable/failed results.
 
-For the M5B hosted check, after human review lands this version on protected
+For the remaining M5B hosted check, after reviewing the version on protected
 `main`, independently set `TASKLY_PR_AGENT_BASE_SHA` to that exact reviewed SHA
 in `taskly-pr-agent`; keep its environment-only key and branch/approval rules.
 Start with `TASKLY_PR_AI_ENABLED` unset/false. Create a same-repository,
