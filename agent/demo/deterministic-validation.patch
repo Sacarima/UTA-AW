@@ -1,0 +1,12 @@
+diff --git a/backend/app/features/todos/validators.py b/backend/app/features/todos/validators.py
+--- a/backend/app/features/todos/validators.py
++++ b/backend/app/features/todos/validators.py
+@@ -9,7 +9,7 @@ def validate_patch_fields(model: Model) -> Model:
+     """Require a non-empty patch and allow explicit null only for the due date."""
+     if not model.model_fields_set:
+         raise ValueError("Provide at least one field to update.")
+-    for field in model.model_fields_set - {"due_date"}:
++    for field in sorted(model.model_fields_set - {"due_date"}):
+         if getattr(model, field) is None:
+             raise ValueError(f"Field {field} cannot be null.")
+     return model
