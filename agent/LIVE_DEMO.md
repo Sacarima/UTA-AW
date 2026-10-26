@@ -84,6 +84,46 @@ Official GitHub references: [environment protections and secrets](https://docs.g
 [manual dispatch semantics](https://docs.github.com/en/actions/reference/workflows-and-actions/events-that-trigger-workflows#workflow_dispatch),
 [pinned artifact action](https://github.com/actions/upload-artifact/commit/ea165f8d65b6e75b540449e92b4886f43607fa02).
 
+### Diagnosing identity-gate failures
+
+An environment approval and a configured variable do not prove that every
+identity check passed. The gate now reports `identity_gate.NAME=true|false`,
+never variable values, environment dumps, tokens or secrets. Its original
+validation expression and strict input acceptance are unchanged. The six
+predicate booleans separately identify base/head SHA formats, distinct commits,
+both approval/workflow comparisons, and PR-number format. Additional boolean
+flags identify missing values, outer whitespace, non-ASCII text and quotes.
+Whitespace/formatting is diagnosed, not stripped to make an invalid input pass.
+
+GitHub documents that environment-level configuration becomes available after
+the runner declares the environment, and that these values are accessible
+through the `vars` context. Keep the approved value's binding in the gate's
+**step** `env` mapping; do not promote it to workflow/job `env`, replace it with
+the submitted base, or assume that it is automatically exported as
+`$TASKLY_DEMO_BASE_SHA`. GitHub explicitly supports this step-level pattern.
+The original failure was subsequently reported to have nonempty APPROVED_BASE,
+both SHA equalities true, and distinct base/head values; this rules out the
+suspected configuration timing failure. The original expression passes locally
+with the pinned commits and literal PR number `2`. If these comparisons are
+true at runtime, the remaining possible failures are SHA or PR-number formatting.
+For example, trailing whitespace in HEAD preserves the comparisons but fails
+`head_sha_format_valid`; whitespace or quotes around `2` fail
+`pr_number_format_valid`. The exact original failing predicate cannot be
+determined from visually displayed inputs alone, and no hidden character is
+claimed to be confirmed. Use the boolean flags to distinguish these cases.
+No workflow was dispatched during this investigation.
+
+When a reviewed workflow correction is landed, its commit is a new workflow
+revision. A human must review that revision, update the independent environment
+approval variable, and pin the candidate PR to the matching new base before a
+new manual dispatch. Reusing a previously approved SHA with a newer workflow
+must continue to fail closed. Do not copy the input into the approval variable
+automatically to make the check pass.
+
+References: [configuration precedence and timing](https://docs.github.com/en/actions/reference/workflows-and-actions/variables#configuration-variable-precedence),
+[documented step-level vars examples](https://docs.github.com/en/actions/reference/workflows-and-actions/contexts#vars-context),
+[environment variables are accessed through vars](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments#environment-variables).
+
 ## First explicitly authorized real run
 
 1. Complete the human-created PR and environment setup above. Ensure `main`

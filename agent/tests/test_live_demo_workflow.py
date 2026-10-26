@@ -54,6 +54,8 @@ def environment_mapping(lines, indentation):
     for line in lines[lines.index(marker) + 1:]:
         if not line.startswith(" " * (indentation + 2)):
             break
+        if line.strip().startswith("#"):
+            continue
         key, separator, value = line.strip().partition(": ")
         assert separator and key not in values
         values[key] = CONTEXT[value] if value.startswith("${{") else value
@@ -291,12 +293,93 @@ Path(sys.argv[sys.argv.index('--iidfile') + 1]).write_text({IMAGE!r})
         "--file", "agent/sandbox/Dockerfile", "."]}
 
 
-@pytest.mark.parametrize("bad", [{"APPROVED_BASE": ""}, {"WORKFLOW_SHA": HEAD}, {"HEAD_SHA": BASE},
-    {"BASE_SHA": "main"}, {"HEAD_SHA": "$(touch never)"}, {"PR_NUMBER": "1; echo injected"}])
-def test_approval_gate_rejects_bad_identities_before_checkout_or_installation(hosted, bad):
+def gate_diagnostics(result):
+    diagnostics = {}
+    for line in result.stdout.decode().splitlines():
+        assert re.fullmatch(r'identity_gate\.[A-Za-z0-9_]+=(true|false)', line)
+        key, value = line.removeprefix('identity_gate.').split('=')
+        diagnostics[key] = value == 'true'
+    return diagnostics
+
+
+@pytest.mark.parametrize("bad,predicate", [
+    ({"APPROVED_BASE": ""}, "APPROVED_BASE_present"),
+    ({"APPROVED_BASE": HEAD}, "approval_matches_base"),
+    ({"APPROVED_BASE": "private-approval-value"}, "approval_matches_base"),
+    ({"WORKFLOW_SHA": HEAD}, "workflow_matches_base"),
+    ({"WORKFLOW_SHA": ""}, "WORKFLOW_SHA_present"),
+    ({"WORKFLOW_SHA": "private-workflow-value"}, "workflow_matches_base"),
+    ({"HEAD_SHA": BASE}, "base_head_distinct"),
+    ({"BASE_SHA": ""}, "BASE_SHA_present"),
+    ({"BASE_SHA": "main"}, "base_sha_format_valid"),
+    ({"HEAD_SHA": "$(touch never)"}, "head_sha_format_valid"),
+    ({"PR_NUMBER": "1; echo injected"}, "pr_number_format_valid"),
+])
+def test_approval_gate_rejects_bad_identities_before_checkout_or_installation(hosted, bad, predicate):
     result = execute(hosted, GATE, overrides=bad)
     assert result.returncode != 0
+    output = (result.stdout + result.stderr).decode()
+    assert gate_diagnostics(result)[predicate] is False and BASE not in output and HEAD not in output
+    assert "private-" not in output and "$(touch never)" not in output and "echo injected" not in output
     assert not hosted[2].exists() and not (hosted[0] / "never").exists()
+
+
+def test_missing_environment_configuration_context_does_not_fall_back_to_input_or_process_env(hosted, monkeypatch):
+    # Environment-only values arrive after the environment is declared. Model
+    # an absent vars value honestly instead of always supplying BASE in tests.
+    monkeypatch.setitem(CONTEXT, "${{ vars.TASKLY_DEMO_BASE_SHA }}", "")
+    result = execute(hosted, GATE, overrides={"TASKLY_DEMO_BASE_SHA": BASE})
+    assert result.returncode != 0 and gate_diagnostics(result)["APPROVED_BASE_present"] is False
+    assert BASE.encode() not in result.stderr and not hosted[2].exists()
+
+
+def test_workflow_commit_context_is_not_replaced_with_submitted_base(hosted, monkeypatch):
+    monkeypatch.setitem(CONTEXT, "${{ github.sha }}", HEAD)
+    result = execute(hosted, GATE)
+    assert result.returncode != 0 and gate_diagnostics(result)["workflow_matches_base"] is False
+    assert BASE.encode() not in result.stderr and HEAD.encode() not in result.stderr
+
+
+def test_runtime_only_configuration_is_not_a_documented_vars_replacement(hosted, monkeypatch):
+    monkeypatch.setitem(CONTEXT, "${{ vars.TASKLY_DEMO_BASE_SHA }}", HEAD)
+    result = execute(hosted, GATE, overrides={"TASKLY_DEMO_BASE_SHA": BASE})
+    assert result.returncode != 0 and gate_diagnostics(result)["approval_matches_base"] is False
+    assert not hosted[2].exists()
+
+
+def test_original_expression_passes_known_pinned_commits_and_reported_pr_number(hosted):
+    base = "cbc3d57489aad5b01e6f1fe218d1f7cc2d2620fe"
+    head = "036d546d52be2789c0f8cb4b5e2eeb9e38eda981"
+    result = execute(hosted, GATE, overrides={"BASE_SHA": base, "HEAD_SHA": head, "APPROVED_BASE": base,
+        "WORKFLOW_SHA": base, "PR_NUMBER": "2", "OPENAI_API_KEY": "private-key-must-not-appear"})
+    assert result.returncode == 0
+    diagnostics = gate_diagnostics(result)
+    for predicate in ("base_sha_format_valid", "head_sha_format_valid", "base_head_distinct",
+                      "approval_matches_base", "workflow_matches_base", "pr_number_format_valid"):
+        assert diagnostics[predicate] is True
+    output = (result.stdout + result.stderr).decode()
+    assert "private-key" not in output and base not in output and head not in output
+
+
+@pytest.mark.parametrize("field,pattern", [("HEAD_SHA", "head_sha_format_valid"), ("PR_NUMBER", "pr_number_format_valid")])
+@pytest.mark.parametrize("formatting", ["leading-space", "trailing-space", "newline", "crlf", "double-quotes", "single-quotes", "zero-width"])
+def test_hidden_formatting_identifies_exact_predicate_without_normalizing_input(hosted, field, pattern, formatting):
+    original = HEAD if field == "HEAD_SHA" else "2"
+    value = {"leading-space": " " + original, "trailing-space": original + " ", "newline": original + "\n",
+        "crlf": original + "\r\n", "double-quotes": '"' + original + '"', "single-quotes": "'" + original + "'",
+        "zero-width": original + "\u200b"}[formatting]
+    result = execute(hosted, GATE, overrides={field: value})
+    assert result.returncode != 0
+    diagnostics = gate_diagnostics(result)
+    assert diagnostics[pattern] is False
+    assert diagnostics["approval_matches_base"] and diagnostics["workflow_matches_base"] and diagnostics["base_head_distinct"]
+    if formatting in {"leading-space", "trailing-space", "newline", "crlf"}:
+        assert diagnostics[field + "_has_outer_whitespace"] is True
+    elif formatting in {"double-quotes", "single-quotes"}:
+        assert diagnostics[field + "_contains_quote"] is True
+    else:
+        assert diagnostics[field + "_ascii_only"] is False
+    assert HEAD not in result.stdout.decode() and BASE not in result.stdout.decode()
 
 
 def test_valid_gate_and_manual_only_workflow_security_contract(hosted):

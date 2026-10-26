@@ -39,6 +39,9 @@ jobs:
     steps:
       - name: Gate approved workflow and commit identities
         env:
+          # Environment configuration variables are exposed through vars only
+          # after the runner declares this job's protected environment. Keep
+          # this binding step-scoped; never fall back to the submitted input.
           APPROVED_BASE: ${{ vars.TASKLY_DEMO_BASE_SHA }}
           WORKFLOW_SHA: ${{ github.sha }}
         shell: bash
@@ -46,10 +49,29 @@ jobs:
           set -euo pipefail
           python3 -I - <<'PY'
           import os, re, sys
-          base, head = os.environ['BASE_SHA'], os.environ['HEAD_SHA']
+          values = {key: os.environ.get(key, '') for key in
+                    ('BASE_SHA', 'HEAD_SHA', 'APPROVED_BASE', 'WORKFLOW_SHA', 'PR_NUMBER')}
+          base, head = values['BASE_SHA'], values['HEAD_SHA']
+          # Preserve the original expression exactly; do not strip or normalize
+          # inputs to make malformed identities pass.
           valid = (re.fullmatch(r'[0-9a-f]{40}', base) and re.fullmatch(r'[0-9a-f]{40}', head)
-                   and base != head and base == os.environ['APPROVED_BASE'] == os.environ['WORKFLOW_SHA']
-                   and re.fullmatch(r'[1-9][0-9]{0,9}', os.environ['PR_NUMBER']))
+                   and base != head and base == values['APPROVED_BASE'] == values['WORKFLOW_SHA']
+                   and re.fullmatch(r'[1-9][0-9]{0,9}', values['PR_NUMBER']))
+          checks = {
+              'base_sha_format_valid': bool(re.fullmatch(r'[0-9a-f]{40}', base)),
+              'head_sha_format_valid': bool(re.fullmatch(r'[0-9a-f]{40}', head)),
+              'base_head_distinct': base != head,
+              'approval_matches_base': values['APPROVED_BASE'] == base,
+              'workflow_matches_base': values['WORKFLOW_SHA'] == base,
+              'pr_number_format_valid': bool(re.fullmatch(r'[1-9][0-9]{0,9}', values['PR_NUMBER'])),
+          }
+          for key, value in values.items():
+              checks[key + '_present'] = bool(value)
+              checks[key + '_has_outer_whitespace'] = value != value.strip()
+              checks[key + '_ascii_only'] = value.isascii()
+              checks[key + '_contains_quote'] = "'" in value or '"' in value
+          for name, passed in checks.items():
+              print('identity_gate.' + name + '=' + str(passed).lower())
           if not valid:
               sys.exit('Approved workflow/PR identities are missing or inconsistent.')
           PY

@@ -18,7 +18,10 @@ ROOT = Path(__file__).parents[2]
 
 @pytest.fixture
 def candidate(repository):
-    original = (ROOT / live_demo.SOURCE).read_bytes()
+    # The suite must also run from the demo branch, whose working source already
+    # contains the proposed change. Construct an unsorted baseline as test data.
+    original = (ROOT / live_demo.SOURCE).read_bytes().replace(live_demo.REPLACEMENT, live_demo.ORIGINAL)
+    assert original.count(live_demo.ORIGINAL) == 1
     write(repository, live_demo.SOURCE, original.decode())
     write(repository, live_demo.TEST, "# existing convention-matched tests\n")
     base = commit(repository)
