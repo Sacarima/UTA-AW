@@ -10,8 +10,11 @@ TodoId = Annotated[int, Path(gt=0)]
 
 
 @router.get("", response_model=list[Todo])
-def list_todos(repo: Repository):
-    return repo.list()
+def list_todos(repo: Repository, completed: bool | None = None):
+    todos = repo.list()
+    if completed is None:
+        return todos
+    return [todo for todo in todos if todo.completed == completed]
 
 
 @router.post("", response_model=Todo, status_code=201)
