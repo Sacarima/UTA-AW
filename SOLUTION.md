@@ -126,8 +126,9 @@ calls and must not be added together. See [OPENAI_TRANSPORT.md](agent/OPENAI_TRA
 
 ## 5. Verified examples and results
 
-These are the recorded results supplied for this submission; remote records
-were not re-fetched during documentation preparation.
+The GitHub results below are recorded demonstration evidence; remote records
+were not re-fetched during documentation preparation. The subsequent application
+coverage comparison was measured locally using unchanged coverage configurations.
 
 | Example | Evidence and observed result |
 | --- | --- |
@@ -135,16 +136,48 @@ were not re-fetched during documentation preparation.
 | Automatic analysis/reporting | [PR #3](https://github.com/Sacarima/UTA-AW/pull/3): baseline verification and automatic PR-agent workflow passed. Documentation changes were classified `irrelevant`; decision `skip`, generation status `analysis_skipped`. GitHub Actions bot published a PR comment. No AI generation was needed. |
 | Agent tests after M5B | **1,052 tests passed under Python 3.12.10**, including **45 frontend integration cases**. These are agent tests, not application tests; HTTP and Docker are faked in integration tests. |
 
+### Measured application coverage improvement (M5D)
+
+Four focused unit tests were manually added per application, independently of
+the AI-generated backend demonstration above. Both complete application suites
+passed with **zero failures or skips**, and frontend type checking passed.
+
+| Application | Before statement coverage | After statement coverage | Tests passed, before → after |
+| --- | --- | --- | --- |
+| Backend | 64/145 (44.14%) | **85/145 (58.62%)** | 21 → **25** |
+| Frontend | 78/168 (46.43%) | **90/168 (53.57%)** | 18 → **22** |
+
+- [repository.py](backend/app/features/todos/repository.py): **18/39 → 39/39 statements**.
+  Tests cover creation/persistence, partial updates including false/null values,
+  missing records, and deletion in [test_repository.py](backend/tests/features/todos/test_repository.py).
+- [http.ts](frontend/src/lib/http.ts): **0/12 → 12/12 statements**.
+  Tests cover request options, JSON/204 responses, API/network errors, and
+  cancellation in [http.test.ts](frontend/src/lib/http.test.ts).
+
+With the application dependencies installed as described above, reproduce from
+the repository root using the same commands used for both coverage measurements:
+
+```bash
+(cd backend && .venv/bin/python -m pytest --cov=app --cov-report=term-missing --cov-report=json --cov-report=html)
+(cd frontend && npm run test:coverage)
+(cd frontend && npm run typecheck)
+```
+
+Reports: `backend/coverage/coverage.json`, `backend/coverage/html/index.html`,
+`frontend/coverage/coverage-summary.json`, and `frontend/coverage/index.html`.
+Application code, dependency versions, and coverage exclusions/configuration
+were unchanged. These measured gains are from manually added application tests;
+they are not evidence of an AI-generated coverage increase.
+
 ## 6. Assumptions and limitations
 
 - **Hosted frontend AI generation and automatic paid generation remain unverified.**
   Reporting success on a documentation PR proves neither. Paid generation needs
   explicit GitHub configuration and a passing baseline; already-failing PRs do
   not enter generation. Mixed frontend/backend generation is unsupported.
-- No measured application coverage improvement is claimed. Reported coverage
-  is a suite observation, not a compatible before/after comparison or proof of
-  meaningful assertions. Generated patches are published for review, not
-  automatically applied, merged, or pushed.
+- The application coverage gains above do not establish an AI-generated coverage
+  improvement, and coverage alone does not prove assertion quality. Generated
+  patches are published for review, not automatically applied, merged, or pushed.
 - Git naming conventions and bounded nearby context are not complete dependency
   analysis. Missing required context, runtime, dependencies, or evidence fail closed.
   Forks with missing/ambiguous PR associations cannot receive a matched report;
@@ -161,7 +194,8 @@ were not re-fetched during documentation preparation.
 
 Priorities are an authorized hosted frontend run and automatic paid-generation
 validation, durable atomic spending/idempotency records, stronger assertion and
-report-integrity checks, and reproducible dependency verification. Measure
-compatible baseline/generated coverage before claiming improvement. Mixed-stack
+report-integrity checks, and reproducible dependency verification. For future AI
+runs, compare compatible baseline/generated coverage before attributing gains
+to the agent. Mixed-stack
 support and broader context discovery need explicit tests and cost bounds;
 stronger VM isolation is appropriate where hostile-code risk requires it.
