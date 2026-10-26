@@ -86,7 +86,9 @@ GitHub can run a PR-modified workflow definition. This file's safeguards cannot
 enforce repository-wide Actions policy against a malicious replacement workflow.
 Review workflow changes and use repository/organization Actions restrictions.
 Do not reference secrets in this job or grant fork runs write tokens. No
-self-hosted runners, `pull_request_target`, or `workflow_run` consumer is used.
+self-hosted runners or `pull_request_target` is used. The separate M5
+[PR agent follower](PR_AUTOMATION.md) uses trusted `workflow_run` orchestration
+and GitHub metadata; it never consumes artifacts/code produced by this PR job.
 
 ## First GitHub-hosted validation
 

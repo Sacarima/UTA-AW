@@ -108,7 +108,7 @@ def validate_config(config: AgentConfig) -> AgentConfig:
 
 
 async def run(repository: Path, identity: PRIdentity, image: str, trusted_revision: str,
-              config: AgentConfig, *, allow_paid: bool = False) -> PublicReport:
+              config: AgentConfig, *, allow_paid: bool = False, patch_directory: Path | None = None) -> PublicReport:
     """Trusted Python entry point; opt-in is required even with live config.
 
     Preflight is a trusted runtime smoke probe, not a baseline test run or test
@@ -157,6 +157,17 @@ async def run(repository: Path, identity: PRIdentity, image: str, trusted_revisi
                 verifier=VerifierAdapter(applier, runner, limits=limits))
             execution = await controller.run_configured(
                 RunInput(pr=PRContext(identity=identity, changed_files=())), config)
+        if patch_directory is not None and execution.result.outcome == "passed":
+            from .patches import export_verified_patch
+            from .verification import _drain
+            phase = "patch_export_unavailable"
+            exporting = asyncio.create_task(asyncio.to_thread(
+                export_verified_patch, applier, execution, config.execution_policy, patch_directory))
+            try:
+                await asyncio.shield(exporting)
+            except asyncio.CancelledError:
+                await _drain(exporting)
+                raise
         return public_report(identity, classification, execution)
     except asyncio.CancelledError:
         phase = "cancelled"

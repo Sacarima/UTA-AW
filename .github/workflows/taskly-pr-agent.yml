@@ -1,0 +1,259 @@
+name: Taskly automatic PR agent
+'on':
+  workflow_run:
+    workflows: [Taskly isolated verification]
+    types: [completed]
+permissions: {}
+concurrency:
+  group: taskly-pr-agent-${{ github.event.workflow_run.pull_requests[0].head.sha || github.event.workflow_run.head_sha }}
+  cancel-in-progress: false
+jobs:
+  analyze:
+    if: github.repository == 'Sacarima/UTA-AW' && github.event.workflow_run.event == 'pull_request' && github.run_attempt == 1
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      ready: ${{ steps.prepare.outputs.ready }}
+      eligible: ${{ steps.analysis.outputs.eligible }}
+      head: ${{ steps.prepare.outputs.head }}
+    steps:
+      - name: Checkout reviewed default-branch orchestration
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+          set-safe-directory: false
+          submodules: false
+          lfs: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.10'
+      - name: Install trusted analysis package
+        working-directory: trusted
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir "$RUNNER_TEMP/pr-analysis"
+          python -m venv "$RUNNER_TEMP/agent-venv"
+          "$RUNNER_TEMP/agent-venv/bin/python" -m pip install ./agent
+      - name: Resolve source run and current PR from GitHub
+        id: prepare
+        working-directory: trusted
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_RUN: ${{ github.event.workflow_run.id }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/agent-venv/bin/python" -I -m taskly_agent.pr_automation prepare \
+            --name "$REPOSITORY" --source-run "$SOURCE_RUN" --directory "$RUNNER_TEMP/pr-analysis"
+      - name: Checkout candidate as pinned Git data only
+        if: steps.prepare.outputs.ready == 'true'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ steps.prepare.outputs.head }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+          set-safe-directory: false
+          submodules: false
+          lfs: false
+      - name: Analyze real pinned changes without model credentials
+        id: analysis
+        working-directory: trusted
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_RUN: ${{ github.event.workflow_run.id }}
+          EXPECTED_HEAD: ${{ steps.prepare.outputs.head }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/agent-venv/bin/python" -I -m taskly_agent.pr_automation analyze \
+            --repository ../candidate --name "$REPOSITORY" --source-run "$SOURCE_RUN" \
+            --expected-head "$EXPECTED_HEAD" --directory "$RUNNER_TEMP/pr-analysis"
+      - name: Upload sanitized analysis only
+        if: ${{ always() && steps.prepare.outputs.ready == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: taskly-pr-analysis
+          path: ${{ runner.temp }}/pr-analysis/report.json
+          if-no-files-found: error
+          retention-days: 3
+  generate:
+    needs: analyze
+    if: needs.analyze.outputs.eligible == 'true' && vars.TASKLY_PR_AI_ENABLED == 'true' && github.run_attempt == 1
+    environment: taskly-pr-agent
+    runs-on: ubuntu-24.04
+    timeout-minutes: 25
+    permissions:
+      contents: read
+      pull-requests: read
+      actions: read
+    outputs:
+      report_ready: ${{ steps.admit.outputs.ready }}
+    steps:
+      - name: Checkout reviewed generation code
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+          set-safe-directory: false
+          submodules: false
+          lfs: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.10'
+      - name: Provision reviewed orchestration
+        working-directory: trusted
+        shell: bash
+        run: |
+          set -euo pipefail
+          umask 077
+          mkdir "$RUNNER_TEMP/pr-generation"
+          python -m venv "$RUNNER_TEMP/agent-venv"
+          "$RUNNER_TEMP/agent-venv/bin/python" -m pip install './agent[openai]'
+      - name: Recheck independent authorization and credential availability
+        id: admit
+        working-directory: trusted
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_RUN: ${{ github.event.workflow_run.id }}
+          EXPECTED_HEAD: ${{ needs.analyze.outputs.head }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          TASKLY_PR_AI_ENABLED: ${{ vars.TASKLY_PR_AI_ENABLED }}
+          APPROVED_BASE: ${{ vars.TASKLY_PR_AGENT_BASE_SHA }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$RUNNER_TEMP/agent-venv/bin/python" -I -m taskly_agent.pr_automation admit \
+            --name "$REPOSITORY" --source-run "$SOURCE_RUN" --expected-head "$EXPECTED_HEAD" \
+            --workflow-sha "$WORKFLOW_SHA" --directory "$RUNNER_TEMP/pr-generation"
+      - name: Checkout admitted candidate as Git data
+        if: steps.admit.outputs.eligible == 'true'
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ steps.admit.outputs.head }}
+          path: candidate
+          fetch-depth: 0
+          persist-credentials: false
+          set-safe-directory: false
+          submodules: false
+          lfs: false
+      - name: Provision existing sandbox from approved inputs only
+        if: steps.admit.outputs.eligible == 'true'
+        working-directory: trusted
+        env:
+          BASE_SHA: ${{ steps.admit.outputs.base }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          /usr/bin/docker build --platform linux/amd64 --build-arg "TRUSTED_REVISION=$BASE_SHA" \
+            --iidfile "$RUNNER_TEMP/pr-generation/image.id" --file agent/sandbox/Dockerfile .
+          test -s "$RUNNER_TEMP/pr-generation/image.id"
+      - name: Invoke existing controller and real independent verifier
+        id: execution
+        if: steps.admit.outputs.eligible == 'true'
+        working-directory: trusted
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_RUN: ${{ github.event.workflow_run.id }}
+          EXPECTED_HEAD: ${{ needs.analyze.outputs.head }}
+          WORKFLOW_SHA: ${{ github.sha }}
+          TASKLY_PR_AI_ENABLED: ${{ vars.TASKLY_PR_AI_ENABLED }}
+          APPROVED_BASE: ${{ vars.TASKLY_PR_AGENT_BASE_SHA }}
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" GH_TOKEN="$GH_TOKEN" \
+            GITHUB_OUTPUT="$GITHUB_OUTPUT" \
+            TASKLY_PR_AI_ENABLED="$TASKLY_PR_AI_ENABLED" APPROVED_BASE="$APPROVED_BASE" OPENAI_API_KEY="$OPENAI_API_KEY" \
+            "$RUNNER_TEMP/agent-venv/bin/python" -I -m taskly_agent.pr_automation generate \
+            --repository ../candidate --name "$REPOSITORY" --source-run "$SOURCE_RUN" --expected-head "$EXPECTED_HEAD" \
+            --workflow-sha "$WORKFLOW_SHA" --image-file "$RUNNER_TEMP/pr-generation/image.id" \
+            --directory "$RUNNER_TEMP/pr-generation"
+      - name: Upload sanitized generation report
+        if: ${{ always() && steps.admit.outputs.ready == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: taskly-pr-generation
+          path: ${{ runner.temp }}/pr-generation/report.json
+          if-no-files-found: error
+          retention-days: 3
+      - name: Retain verified test-only patch for human review
+        if: ${{ success() && steps.execution.outputs.eligible == 'true' }}
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: taskly-verified-tests-${{ needs.analyze.outputs.head }}
+          path: ${{ runner.temp }}/pr-generation/patch/
+          if-no-files-found: error
+          retention-days: 3
+  publish:
+    needs: [analyze, generate]
+    if: ${{ always() && needs.analyze.outputs.ready == 'true' && github.run_attempt == 1 }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: write
+    steps:
+      - name: Checkout reviewed publisher only
+        uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          ref: ${{ github.sha }}
+          path: trusted
+          persist-credentials: false
+          set-safe-directory: false
+          submodules: false
+          lfs: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12.10'
+      - name: Install publisher from trusted code
+        working-directory: trusted
+        shell: bash
+        run: |
+          set -euo pipefail
+          python -m venv "$RUNNER_TEMP/agent-venv"
+          "$RUNNER_TEMP/agent-venv/bin/python" -m pip install ./agent
+      - name: Download this trusted workflow's analysis data only
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: taskly-pr-analysis
+          path: ${{ runner.temp }}/publish-analysis
+      - name: Download this workflow's optional generation report only
+        if: needs.generate.outputs.report_ready == 'true'
+        continue-on-error: true
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: taskly-pr-generation
+          path: ${{ runner.temp }}/publish-generation
+      - name: Recheck freshness and publish a sanitized commit-bound PR comment
+        working-directory: trusted
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPOSITORY: ${{ github.repository }}
+          SOURCE_RUN: ${{ github.event.workflow_run.id }}
+          CURRENT_RUN: ${{ github.run_id }}
+          GENERATION_STATE: ${{ needs.generate.result }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          env -i PATH=/usr/bin:/bin HOME="$RUNNER_TEMP" GH_TOKEN="$GH_TOKEN" \
+            "$RUNNER_TEMP/agent-venv/bin/python" -I -m taskly_agent.pr_automation publish \
+            --name "$REPOSITORY" --source-run "$SOURCE_RUN" --workflow-run "$CURRENT_RUN" \
+            --directory "$RUNNER_TEMP/publish-analysis" --generated-report "$RUNNER_TEMP/publish-generation/report.json" \
+            --generation-state "$GENERATION_STATE"
